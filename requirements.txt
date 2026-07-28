@@ -1,5 +1,5 @@
-flask
-gunicorn
-yfinance
-pandas
-numpy
+flask==3.0.3
+gunicorn==22.0.0
+yfinance==0.2.54
+pandas>=2.0
+numpy>=1.26
