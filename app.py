@@ -1,424 +1,543 @@
-from flask import Flask, jsonify, render_template_string
+#!/usr/bin/env python3
+"""
+ES Regime Scanner v2 - live dashboard + confidence-scored alert engine
+------------------------------------------------------------------------
+Alert-only. Paper trading decision support. Never places orders.
+
+1H BIAS (weighted score, direction from regression slope):
+  - Linear regression slope + quality (dual lookback 40/20, best-R2 fit wins,
+    so fresh trends are detected instead of blocked by a stale long window)
+  - 50 EMA vs 200 EMA
+  - Market structure: HH/HL vs LH/LL from swing fractals
+  - Session VWAP position (RTH only; excluded from score outside RTH)
+
+SETUP (stateful): once price pulls back to/through the regression midline in a
+qualified trend, the setup stays ARMED for up to ARM_HOURS, waiting for a
+trigger - no more "everything must line up in one snapshot".
+Invalidation: pullback deeper than 2.75 sigma (trend likely broken).
+
+5m TRIGGER (scored; momentum-resume bar is mandatory):
+  - Bar closes beyond prior bar's high/low (momentum resumes)   [mandatory]
+  - RSI crosses back through 50 in trend direction
+  - MACD histogram improving (3 rising/falling bars)
+  - Volume expansion on the signal bar
+  - Price on the right side of session VWAP (RTH only)
+
+AVOID FILTERS (any one blocks the alert):
+  - Ranging market: |slope| below threshold or bias score < 60%
+  - Extremely low volume: signal-bar volume < 35% of its 20-bar average
+  - Extended move: 1H travel over last 6 bars > 3x ATR(14)  (climax - don't chase)
+  - Chasing: price already back beyond midline +0.35 sigma in trend direction
+
+CONFIDENCE = weighted bias + trigger points / available points. Alert fires
+only at >= CONF_MIN (default 75%), max 2/day, 120 min cooldown.
+"""
+
+import os
+import smtplib
+import threading
+import time
+import traceback
+from datetime import datetime, timezone
+from email.mime.text import MIMEText
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from datetime import datetime
+from flask import Flask, jsonify, render_template
+
+# ----------------------------------------------------------------------
+# Config - env vars override where noted
+# ----------------------------------------------------------------------
+SYMBOL = "ES=F"
+LOOKBACKS = (40, 20)                                      # dual regression windows
+MIN_R2 = float(os.environ.get("MIN_R2", 0.45))
+MIN_SLOPE = float(os.environ.get("MIN_SLOPE", 0.30))      # pts per 1h bar
+BIAS_MIN_PCT = float(os.environ.get("BIAS_MIN_PCT", 60))  # % of bias weight to arm
+CONF_MIN = float(os.environ.get("CONF_MIN", 75))          # % to fire an alert
+ARM_HOURS = float(os.environ.get("ARM_HOURS", 8))         # armed setup lifetime
+PULLBACK_Z = 0.25          # long: armed when z <= +0.25 (at/through midline)
+INVALID_Z = 2.75           # pullback deeper than this against trend = broken
+CHASE_Z = 0.35             # no entry if price already beyond mid +0.35s in trend dir
+RSI_LEN, EMA_FAST, EMA_SLOW = 14, 50, 200
+STOP_PTS, TARGET1_PTS = 10.0, 10.0
+MAX_ALERTS_PER_DAY, COOLDOWN_MIN = 2, 120
+POLL_FAST = int(os.environ.get("POLL_FAST", 30))
+POLL_SLOW = int(os.environ.get("POLL_SLOW", 180))
+CHART_BARS = 200
+
+# Weights (points). VWAP weights are excluded from the denominator outside RTH.
+W_BIAS = {"slope_dir": 10, "slope_strength": 10, "r2": 15, "ema": 15,
+          "structure": 15, "vwap_bias": 10}
+W_TRIG = {"momentum_bar": 12, "rsi_cross": 10, "macd_hist": 6,
+          "volume": 7, "vwap_side": 5}
+
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_APP_PASSWORD = os.environ.get("SMTP_APP_PASSWORD", "")
+SMS_TO = os.environ.get("SMS_TO", "")
 
 app = Flask(__name__)
-
-CONFIG = {
-    "symbol": "ES=F",
-    "htf_interval": "1h", "htf_period": "30d", "htf_lookback": 40,
-    "min_r2": 0.55, "min_slope_pts": 0.35,
-    "pullback_z_min": 1.0, "pullback_z_max": 2.5,
-    "ltf_interval": "5m", "ltf_period": "5d",
-    "rsi_len": 14, "rsi_reset_level": 40, "rsi_trigger_level": 45,
-    "rsi_reset_window": 8, "ema_len": 20, "vol_mult": 1.1,
-    "stop_pts": 10.0, "target1_pts": 10.0,
-    "point_value_usd": 50,       # standard ES = $50/point. Micro ES (MES) = $5/point.
-    "default_contracts": 1,
+LOCK = threading.Lock()
+STATE = {
+    "last_price": None, "prev_close": None, "change_pts": None, "change_pct": None,
+    "price_updated": None,
+    "chart": {"t": [], "c": []},
+    "bias": None,            # direction, pct, factors[], slope, r2, z, lookback, ...
+    "setup": None,           # {direction, armed_at, expires_at}  when armed
+    "trigger": None,         # factors[], mandatory_ok
+    "avoid": [],             # active avoid-filter reasons
+    "confidence": None,
+    "alerts": [], "alerts_today": 0, "alerts_date": "", "last_alert_ts": 0.0,
+    "feed": {"status": "starting", "detail": "", "errors": 0},
 }
+
 
 # ----------------------------------------------------------------------
 # Indicators
 # ----------------------------------------------------------------------
-def linreg_channel(closes):
+def linreg(closes: np.ndarray):
     x = np.arange(len(closes), dtype=float)
     b, a = np.polyfit(x, closes, 1)
     fitted = a + b * x
     resid = closes - fitted
-    ss_res = float(np.sum(resid ** 2))
     ss_tot = float(np.sum((closes - closes.mean()) ** 2))
-    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    resid_std = float(np.std(resid, ddof=1)) if len(closes) > 2 else 0.0
-    return float(b), r2, resid_std, float(fitted[-1])
+    r2 = 1.0 - float(np.sum(resid ** 2)) / ss_tot if ss_tot > 0 else 0.0
+    std = float(np.std(resid, ddof=1)) if len(closes) > 2 else 0.0
+    return float(b), r2, std, float(fitted[-1])
 
-def rsi(series, length):
+
+def best_regression(closes: pd.Series):
+    """Fit each lookback; return the fit with the higher R^2 (fresh-trend friendly)."""
+    best = None
+    for lb in LOOKBACKS:
+        arr = closes.tail(lb).to_numpy(dtype=float)
+        slope, r2, std, fitted_last = linreg(arr)
+        cand = {"lookback": lb, "slope": slope, "r2": r2, "std": std,
+                "fitted_last": fitted_last}
+        if best is None or r2 > best["r2"]:
+            best = cand
+    return best
+
+
+def rsi(series: pd.Series, length: int) -> pd.Series:
     delta = series.diff()
-    gain = delta.clip(lower=0).ewm(alpha=1/length, adjust=False).mean()
-    loss = (-delta.clip(upper=0)).ewm(alpha=1/length, adjust=False).mean()
+    gain = delta.clip(lower=0).ewm(alpha=1 / length, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / length, adjust=False).mean()
     rs = gain / loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
-def fetch_bars(interval, period):
-    df = yf.download(CONFIG["symbol"], interval=interval, period=period,
-                      progress=False, prepost=True, auto_adjust=False)
+
+def macd_hist(series: pd.Series) -> pd.Series:
+    macd = series.ewm(span=12, adjust=False).mean() - series.ewm(span=26, adjust=False).mean()
+    return macd - macd.ewm(span=9, adjust=False).mean()
+
+
+def atr(df: pd.DataFrame, n: int = 14) -> float:
+    h, l, c = df["High"], df["Low"], df["Close"].shift()
+    tr = pd.concat([h - l, (h - c).abs(), (l - c).abs()], axis=1).max(axis=1)
+    return float(tr.rolling(n).mean().iloc[-1])
+
+
+def swing_structure(htf: pd.DataFrame, k: int = 2, scan: int = 60):
+    """Fractal swings on 1H. Returns 'HH/HL', 'LH/LL', or 'MIXED'."""
+    df = htf.tail(scan)
+    highs, lows = df["High"].to_numpy(), df["Low"].to_numpy()
+    sh, sl = [], []
+    for i in range(k, len(df) - k):
+        if highs[i] == max(highs[i - k:i + k + 1]):
+            sh.append(highs[i])
+        if lows[i] == min(lows[i - k:i + k + 1]):
+            sl.append(lows[i])
+    if len(sh) < 2 or len(sl) < 2:
+        return "MIXED"
+    hh, hl = sh[-1] > sh[-2], sl[-1] > sl[-2]
+    lh, ll = sh[-1] < sh[-2], sl[-1] < sl[-2]
+    if hh and hl:
+        return "HH/HL"
+    if lh and ll:
+        return "LH/LL"
+    return "MIXED"
+
+
+def session_vwap(ltf: pd.DataFrame):
+    """RTH VWAP anchored at 09:30 ET. Returns (vwap, applicable, in_rth)."""
+    idx = ltf.index.tz_convert("America/New_York")
+    now = datetime.now(timezone.utc).astimezone(idx.tz)
+    in_rth = (now.weekday() < 5 and
+              (now.hour, now.minute) >= (9, 30) and now.hour < 16)
+    if not in_rth:
+        return None, False, False
+    day = now.date()
+    mask = (idx.date == day) & (idx.time >= pd.Timestamp("09:30").time())
+    sess = ltf.loc[mask]
+    if len(sess) < 3 or float(sess["Volume"].sum()) <= 0:
+        return None, False, True
+    tp = (sess["High"] + sess["Low"] + sess["Close"]) / 3
+    vwap = float((tp * sess["Volume"]).sum() / sess["Volume"].sum())
+    return vwap, True, True
+
+
+# ----------------------------------------------------------------------
+# Bias / trigger / avoid evaluation
+# ----------------------------------------------------------------------
+def factor(name, ok, na=False, detail=""):
+    return {"name": name, "ok": bool(ok), "na": bool(na), "detail": detail}
+
+
+def eval_bias(htf: pd.DataFrame, ltf: pd.DataFrame):
+    closed = htf.iloc[:-1]
+    close = closed["Close"]
+    reg = best_regression(close)
+    slope, r2, std = reg["slope"], reg["r2"], reg["std"]
+    last = float(close.iloc[-1])
+    z = (last - reg["fitted_last"]) / std if std > 0 else 0.0
+
+    direction = "LONG" if slope >= MIN_SLOPE else "SHORT" if slope <= -MIN_SLOPE else None
+    bull = slope > 0
+
+    ema_f = float(close.ewm(span=EMA_FAST, adjust=False).mean().iloc[-1])
+    ema_s = float(close.ewm(span=EMA_SLOW, adjust=False).mean().iloc[-1])
+    ema_ok = (ema_f > ema_s) if bull else (ema_f < ema_s)
+
+    structure = swing_structure(closed)
+    struct_ok = (structure == "HH/HL") if bull else (structure == "LH/LL")
+
+    vwap, vwap_ok_applicable, in_rth = session_vwap(ltf.iloc[:-1])
+    if vwap_ok_applicable:
+        px = float(ltf["Close"].iloc[-1])
+        vwap_ok = (px > vwap) if bull else (px < vwap)
+        vwap_f = factor("Above VWAP" if bull else "Below VWAP", vwap_ok,
+                        detail=f"vwap {vwap:.2f}")
+    else:
+        vwap_ok = None
+        vwap_f = factor("VWAP position", False, na=True,
+                        detail="RTH only" if not in_rth else "no volume data")
+
+    factors = [
+        factor(f"Regression slope {'positive' if bull else 'negative'}",
+               direction is not None, detail=f"{slope:+.2f} pts/bar, lb {reg['lookback']}"),
+        factor("Slope strength", abs(slope) >= 2 * MIN_SLOPE or
+               (direction is not None and abs(slope) >= MIN_SLOPE),
+               detail=f"|{slope:.2f}| vs min {MIN_SLOPE}"),
+        factor("Trend quality R\u00b2", r2 >= MIN_R2, detail=f"{r2:.2f}"),
+        factor(f"50 EMA {'>' if bull else '<'} 200 EMA", ema_ok,
+               detail=f"{ema_f:.0f} / {ema_s:.0f}"),
+        factor("Structure " + ("HH/HL" if bull else "LH/LL"), struct_ok,
+               detail=structure),
+        vwap_f,
+    ]
+    keys = ["slope_dir", "slope_strength", "r2", "ema", "structure", "vwap_bias"]
+    pts = avail = 0.0
+    for f, kname in zip(factors, keys):
+        if f["na"]:
+            continue
+        avail += W_BIAS[kname]
+        if f["ok"]:
+            pts += W_BIAS[kname]
+    # partial credit for slope strength
+    if direction is not None and not factors[1]["ok"]:
+        pts += W_BIAS["slope_strength"] * min(1.0, abs(slope) / (2 * MIN_SLOPE))
+
+    pct = round(100 * pts / avail, 1) if avail else 0.0
+    return {
+        "direction": direction, "pct": pct, "pts": pts, "avail": avail,
+        "factors": factors, "slope": round(slope, 3), "r2": round(r2, 3),
+        "z": round(z, 2), "resid_std": round(std, 2),
+        "fitted_last": round(reg["fitted_last"], 2), "lookback": reg["lookback"],
+        "structure": structure, "ema_fast": round(ema_f, 2), "ema_slow": round(ema_s, 2),
+        "vwap": round(vwap, 2) if vwap else None, "in_rth": in_rth,
+        "fitted_last_ts": close.index[-1].tz_convert("UTC").isoformat()
+        if close.index.tz else close.index[-1].tz_localize("UTC").isoformat(),
+        "trend": "UP" if bull and direction else "DOWN" if direction else "FLAT",
+        "quality_ok": direction is not None and pct >= BIAS_MIN_PCT,
+        "updated": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
+    closed = ltf.iloc[:-1]
+    close = closed["Close"]
+    long_ = direction == "LONG"
+
+    c = float(close.iloc[-1])
+    prev_h, prev_l = float(closed["High"].iloc[-2]), float(closed["Low"].iloc[-2])
+    momentum = c > prev_h if long_ else c < prev_l
+
+    r = rsi(close, RSI_LEN)
+    r_now, r_win = float(r.iloc[-1]), r.iloc[-5:-1]
+    rsi_ok = (r_win.min() < 50 and r_now > 50) if long_ else (r_win.max() > 50 and r_now < 50)
+
+    h = macd_hist(close)
+    h3 = h.iloc[-3:].to_numpy()
+    macd_ok = bool(np.all(np.diff(h3) > 0)) if long_ else bool(np.all(np.diff(h3) < 0))
+
+    vol = closed["Volume"]
+    vavg = float(vol.rolling(20).mean().iloc[-1])
+    vol_na = not np.isfinite(vavg) or vavg <= 0
+    vol_ok = (not vol_na) and float(vol.iloc[-1]) >= 1.1 * vavg
+
+    vwap = bias.get("vwap")
+    if vwap:
+        vwap_ok = c > vwap if long_ else c < vwap
+        vwap_f = factor("Above VWAP" if long_ else "Below VWAP", vwap_ok)
+    else:
+        vwap_f = factor("VWAP side", False, na=True, detail="RTH only")
+
+    factors = [
+        factor("Momentum resumes (closes beyond prior bar)", momentum,
+               detail=f"close {c:.2f}"),
+        factor(f"RSI crossed {'above' if long_ else 'below'} 50", rsi_ok,
+               detail=f"RSI {r_now:.0f}"),
+        factor("MACD histogram improving", macd_ok),
+        factor("Volume increasing on signal bar", vol_ok, na=vol_na,
+               detail="" if vol_na else f"{float(vol.iloc[-1])/vavg:.1f}x avg"),
+        vwap_f,
+    ]
+    keys = ["momentum_bar", "rsi_cross", "macd_hist", "volume", "vwap_side"]
+    pts = avail = 0.0
+    for f, kname in zip(factors, keys):
+        if f["na"]:
+            continue
+        avail += W_TRIG[kname]
+        if f["ok"]:
+            pts += W_TRIG[kname]
+    return {"factors": factors, "pts": pts, "avail": avail,
+            "mandatory_ok": momentum, "entry": c}
+
+
+def eval_avoid(htf: pd.DataFrame, ltf: pd.DataFrame, bias: dict):
+    reasons = []
+    if bias["direction"] is None:
+        reasons.append("Ranging market - regression slope too flat")
+    elif bias["pct"] < BIAS_MIN_PCT:
+        reasons.append(f"Bias score {bias['pct']:.0f}% < {BIAS_MIN_PCT:.0f}% - mixed signals")
+
+    closed = htf.iloc[:-1]
+    a = atr(closed, 14)
+    if np.isfinite(a) and a > 0:
+        travel = abs(float(closed["Close"].iloc[-1]) - float(closed["Close"].iloc[-7]))
+        if travel > 3 * a:
+            reasons.append(f"Extended move: {travel:.0f} pts in 6h > 3x ATR ({a:.0f})")
+
+    if bias["direction"]:
+        z = bias["z"]
+        chasing = z > CHASE_Z if bias["direction"] == "LONG" else z < -CHASE_Z
+        if chasing:
+            reasons.append(f"Chasing: price {z:+.1f}\u03c3 past midline in trend direction")
+
+    vol = ltf.iloc[:-1]["Volume"]
+    vavg = float(vol.rolling(20).mean().iloc[-1])
+    if np.isfinite(vavg) and vavg > 0 and float(vol.iloc[-1]) < 0.35 * vavg:
+        reasons.append("Extremely low volume period")
+    return reasons
+
+
+# ----------------------------------------------------------------------
+# Alerts
+# ----------------------------------------------------------------------
+def send_sms(body: str):
+    if not (SMTP_USER and SMTP_APP_PASSWORD and SMS_TO):
+        return
+    try:
+        msg = MIMEText(body)
+        msg["From"], msg["To"], msg["Subject"] = SMTP_USER, SMS_TO, "ES Alert"
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+            s.starttls()
+            s.login(SMTP_USER, SMTP_APP_PASSWORD)
+            s.send_message(msg)
+    except Exception as e:
+        print(f"[warn] SMS failed: {e}")
+
+
+def format_alert(direction, conf, bias, trig, entry, stop, t1):
+    lines = [f"{direction} ES", f"Confidence: {conf:.0f}%", "Reason:"]
+    for f in bias["factors"] + trig["factors"]:
+        mark = "\u2013" if f["na"] else ("\u2713" if f["ok"] else "\u2717")
+        lines.append(f"{mark} {f['name']}")
+    lines += ["", f"Entry:\n{entry:.2f}", f"Stop:\n{stop:.2f}",
+              f"Scale 1/2 at {t1:.2f}, stop->BE, trail runner on 5m swings"]
+    return "\n".join(lines)
+
+
+def maybe_alert(direction, conf, bias, trig):
+    now = time.time()
+    today = datetime.now(timezone.utc).date().isoformat()
+    with LOCK:
+        if STATE["alerts_date"] != today:
+            STATE["alerts_date"], STATE["alerts_today"] = today, 0
+        if STATE["alerts_today"] >= MAX_ALERTS_PER_DAY:
+            return False
+        if now - STATE["last_alert_ts"] < COOLDOWN_MIN * 60:
+            return False
+        entry = trig["entry"]
+        stop = entry - STOP_PTS if direction == "LONG" else entry + STOP_PTS
+        t1 = entry + TARGET1_PTS if direction == "LONG" else entry - TARGET1_PTS
+        alert = {"ts": datetime.now(timezone.utc).isoformat(), "direction": direction,
+                 "confidence": round(conf), "entry": round(entry, 2),
+                 "stop": round(stop, 2), "t1": round(t1, 2),
+                 "factors": [{"name": f["name"], "ok": f["ok"], "na": f["na"]}
+                             for f in bias["factors"] + trig["factors"]]}
+        STATE["alerts"].insert(0, alert)
+        STATE["alerts"] = STATE["alerts"][:20]
+        STATE["alerts_today"] += 1
+        STATE["last_alert_ts"] = now
+    body = format_alert(direction, conf, bias, trig, entry, stop, t1)
+    print("ALERT\n" + body)
+    send_sms(body)
+    return True
+
+
+# ----------------------------------------------------------------------
+# Data + scanner loop
+# ----------------------------------------------------------------------
+def fetch(interval: str, period: str) -> pd.DataFrame:
+    df = yf.download(SYMBOL, interval=interval, period=period,
+                     progress=False, prepost=True, auto_adjust=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df = df.dropna()
-    return df.iloc[:-1]
+    df = df.dropna(subset=["Close"])
+    if len(df) < 5:
+        raise RuntimeError(f"empty {interval} response")
+    return df
+
+
+def scanner_loop():
+    last_slow, htf = 0.0, None
+    while True:
+        try:
+            ltf = fetch("5m", "2d")
+            closes = ltf["Close"]
+            last_price = float(closes.iloc[-1])
+            idx = ltf.index.tz_convert("UTC") if ltf.index.tz else ltf.index.tz_localize("UTC")
+
+            try:
+                daily = fetch("1d", "5d")
+                prev_close = float(daily["Close"].iloc[-2])
+            except Exception:
+                prev_close = STATE["prev_close"]
+
+            if htf is None or time.time() - last_slow >= POLL_SLOW:
+                htf = fetch("1h", "60d")
+                last_slow = time.time()
+
+            bias = eval_bias(htf, ltf)
+            avoid = eval_avoid(htf, ltf, bias)
+
+            # ---- stateful pullback arming ----
+            now = time.time()
+            setup = STATE["setup"]
+            if setup and (now > setup["expires_at"] or
+                          setup["direction"] != bias["direction"]):
+                setup = None
+            if bias["quality_ok"] and bias["direction"]:
+                z = bias["z"]
+                pulled = z <= PULLBACK_Z if bias["direction"] == "LONG" else z >= -PULLBACK_Z
+                broken = z < -INVALID_Z if bias["direction"] == "LONG" else z > INVALID_Z
+                if broken:
+                    setup = None
+                elif pulled and setup is None:
+                    setup = {"direction": bias["direction"], "armed_at": now,
+                             "expires_at": now + ARM_HOURS * 3600}
+            else:
+                setup = None
+
+            trig, conf = None, None
+            if setup:
+                trig = eval_trigger(ltf, setup["direction"], bias)
+                denom = bias["avail"] + trig["avail"]
+                conf = 100 * (bias["pts"] + trig["pts"]) / denom if denom else 0.0
+                if trig["mandatory_ok"] and not avoid and conf >= CONF_MIN:
+                    if maybe_alert(setup["direction"], conf, bias, trig):
+                        setup = None  # consumed
+
+            with LOCK:
+                STATE["last_price"] = round(last_price, 2)
+                STATE["price_updated"] = datetime.now(timezone.utc).isoformat()
+                if prev_close:
+                    STATE["prev_close"] = round(prev_close, 2)
+                    STATE["change_pts"] = round(last_price - prev_close, 2)
+                    STATE["change_pct"] = round((last_price / prev_close - 1) * 100, 2)
+                tail = idx[-CHART_BARS:]
+                STATE["chart"] = {"t": [t.isoformat() for t in tail],
+                                  "c": [round(float(v), 2) for v in closes.iloc[-CHART_BARS:]]}
+                STATE["bias"], STATE["avoid"] = bias, avoid
+                STATE["setup"] = setup
+                STATE["trigger"] = ({"factors": trig["factors"],
+                                     "mandatory_ok": trig["mandatory_ok"]} if trig else None)
+                STATE["confidence"] = round(conf, 1) if conf is not None else None
+                STATE["feed"] = {"status": "live", "detail": "", "errors": 0}
+
+        except Exception as e:
+            with LOCK:
+                STATE["feed"]["errors"] += 1
+                STATE["feed"]["status"] = "stale" if STATE["last_price"] else "error"
+                STATE["feed"]["detail"] = str(e)[:200]
+            print(f"[error] scanner: {e}")
+            traceback.print_exc()
+
+        time.sleep(POLL_FAST)
+
+
+_started, _start_lock = False, threading.Lock()
+
+
+def start_scanner():
+    global _started
+    with _start_lock:
+        if not _started:
+            threading.Thread(target=scanner_loop, daemon=True).start()
+            _started = True
+
+
+start_scanner()
+
 
 # ----------------------------------------------------------------------
-# Fast live price (polled every few seconds — separate from the heavier
-# regime calc so the ticker feels instant without hammering Yahoo)
+# Routes
 # ----------------------------------------------------------------------
-def get_live_price():
-    try:
-        t = yf.Ticker(CONFIG["symbol"])
-        fi = t.fast_info
-        price = float(fi["last_price"])
-        prev_close = float(fi.get("previous_close") or price)
-    except Exception:
-        df = fetch_bars("1m", "1d")
-        price = float(df["Close"].iloc[-1])
-        prev_close = float(df["Close"].iloc[0])
-    change = price - prev_close
-    change_pct = (change / prev_close * 100) if prev_close else 0.0
-    return {
-        "price": round(price, 2),
-        "change": round(change, 2),
-        "change_pct": round(change_pct, 2),
-        "server_time": datetime.now().strftime("%H:%M:%S"),
-    }
+@app.route("/")
+def index():
+    return render_template("index.html", symbol=SYMBOL)
 
-# ----------------------------------------------------------------------
-# Full regime + confirmation scan (heavier — polled every 60s)
-# ----------------------------------------------------------------------
-def get_status():
-    htf = fetch_bars(CONFIG["htf_interval"], CONFIG["htf_period"])
-    window = htf["Close"].tail(CONFIG["htf_lookback"]).to_numpy(dtype=float)
-    slope, r2, resid_std, fitted_last = linreg_channel(window)
-    last_close = float(window[-1])
-    z = (last_close - fitted_last) / resid_std if resid_std > 0 else 0.0
-
-    direction = None
-    if r2 >= CONFIG["min_r2"] and abs(slope) >= CONFIG["min_slope_pts"]:
-        lo, hi = CONFIG["pullback_z_min"], CONFIG["pullback_z_max"]
-        if slope > 0 and -hi <= z <= -lo:
-            direction = "LONG"
-        elif slope < 0 and lo <= z <= hi:
-            direction = "SHORT"
-
-    confirmations = {}
-    confirmed = False
-    entry = None
-    if direction:
-        ltf = fetch_bars(CONFIG["ltf_interval"], CONFIG["ltf_period"])
-        close = ltf["Close"]
-        ema = close.ewm(span=CONFIG["ema_len"], adjust=False).mean()
-        r = rsi(close, CONFIG["rsi_len"])
-        vol_avg = ltf["Volume"].rolling(20).mean()
-        c = float(close.iloc[-1])
-        entry = c
-        prev_high = float(ltf["High"].iloc[-2])
-        prev_low = float(ltf["Low"].iloc[-2])
-        r_now = float(r.iloc[-1])
-        r_window = r.iloc[-CONFIG["rsi_reset_window"]:-1]
-        v_ok = float(ltf["Volume"].iloc[-1]) >= CONFIG["vol_mult"] * float(vol_avg.iloc[-1])
-        if direction == "LONG":
-            confirmations["RSI reset & turn up"] = bool(r_window.min() < CONFIG["rsi_reset_level"] and r_now > CONFIG["rsi_trigger_level"])
-            confirmations["Close above 20 EMA"] = bool(c > float(ema.iloc[-1]))
-            confirmations["Momentum bar (broke prior high)"] = bool(c > prev_high)
-        else:
-            confirmations["RSI reset & turn down"] = bool(r_window.max() > (100 - CONFIG["rsi_reset_level"]) and r_now < (100 - CONFIG["rsi_trigger_level"]))
-            confirmations["Close below 20 EMA"] = bool(c < float(ema.iloc[-1]))
-            confirmations["Momentum bar (broke prior low)"] = bool(c < prev_low)
-        confirmations["Volume ≥ 1.1x avg"] = bool(v_ok)
-        confirmed = all(confirmations.values())
-
-    trade_setup = None
-    if confirmed and entry is not None:
-        stop = entry - CONFIG["stop_pts"] if direction == "LONG" else entry + CONFIG["stop_pts"]
-        t1 = entry + CONFIG["target1_pts"] if direction == "LONG" else entry - CONFIG["target1_pts"]
-        contracts = CONFIG["default_contracts"]
-        risk_usd = CONFIG["stop_pts"] * CONFIG["point_value_usd"] * contracts
-        trade_setup = {
-            "direction": direction,
-            "entry": round(entry, 2),
-            "stop": round(stop, 2),
-            "target1": round(t1, 2),
-            "contracts": contracts,
-            "risk_usd": round(risk_usd, 2),
-            "plan": "Scale half at target 1 (+10 pts), move stop to breakeven, trail runner on 5m swing structure.",
-        }
-
-    return {
-        "slope": round(slope, 3),
-        "r2": round(r2, 3),
-        "z": round(z, 2),
-        "direction": direction,
-        "confirmations": confirmations,
-        "confirmed": confirmed,
-        "trade_setup": trade_setup,
-        "server_time": datetime.now().strftime("%H:%M:%S"),
-    }
-
-def get_history():
-    ltf = fetch_bars(CONFIG["ltf_interval"], CONFIG["ltf_period"])
-    tail = ltf.tail(150)
-    return {
-        "labels": [ts.strftime("%b %d, %H:%M") for ts in tail.index],
-        "closes": [round(float(c), 2) for c in tail["Close"]],
-    }
-
-@app.route("/api/price")
-def api_price():
-    try:
-        return jsonify(get_live_price())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/status")
 def api_status():
-    try:
-        return jsonify(get_status())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    with LOCK:
+        setup = STATE["setup"]
+        return jsonify({
+            "symbol": SYMBOL,
+            "last_price": STATE["last_price"], "prev_close": STATE["prev_close"],
+            "change_pts": STATE["change_pts"], "change_pct": STATE["change_pct"],
+            "price_updated": STATE["price_updated"],
+            "bias": STATE["bias"], "avoid": STATE["avoid"],
+            "setup": ({"direction": setup["direction"],
+                       "expires_in": max(0, int(setup["expires_at"] - time.time()))}
+                      if setup else None),
+            "trigger": STATE["trigger"], "confidence": STATE["confidence"],
+            "alerts": STATE["alerts"], "alerts_today": STATE["alerts_today"],
+            "max_alerts": MAX_ALERTS_PER_DAY,
+            "cooldown_remaining": max(0, int(COOLDOWN_MIN * 60 -
+                                             (time.time() - STATE["last_alert_ts"])))
+            if STATE["last_alert_ts"] else 0,
+            "feed": STATE["feed"],
+            "params": {"min_r2": MIN_R2, "min_slope": MIN_SLOPE,
+                       "bias_min_pct": BIAS_MIN_PCT, "conf_min": CONF_MIN,
+                       "stop_pts": STOP_PTS, "target1_pts": TARGET1_PTS},
+        })
 
-@app.route("/api/history")
-def api_history():
-    try:
-        return jsonify(get_history())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
-@app.route("/")
-def index():
-    return render_template_string(HTML)
+@app.route("/api/chart")
+def api_chart():
+    with LOCK:
+        return jsonify({"chart": STATE["chart"], "regime": STATE["bias"]})
 
-HTML = """
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>ES Scanner</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<style>
-  :root {
-    --bg: #0a0a0a; --card: #111111; --border: #232323;
-    --text: #ededed; --muted: #888888;
-    --green: #2ecc71; --red: #ef4444; --amber: #f5a623; --blue: #3b82f6;
-  }
-  * { box-sizing: border-box; }
-  body {
-    background: var(--bg); color: var(--text); margin: 0; padding: 32px 20px;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  }
-  .wrap { max-width: 920px; margin: 0 auto; }
-  .top { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; flex-wrap:wrap; gap:12px; }
-  .brand { display:flex; align-items:center; gap:10px; }
-  .dot { width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 8px var(--green); animation: pulse 1.6s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
-  .brand h1 { font-size:15px; font-weight:600; margin:0; letter-spacing:-0.2px; }
-  .brand span { color: var(--muted); font-size:12px; }
-  .badge-symbol { background:#161616; border:1px solid var(--border); padding:5px 12px; border-radius:100px; font-size:12px; color:var(--muted); }
-  .badge-symbol b { color: var(--text); }
 
-  .price-row { display:flex; align-items:baseline; gap:12px; margin: 4px 0 20px; }
-  .price { font-size:42px; font-weight:700; letter-spacing:-1px; transition: color 0.3s; }
-  .price.flash-up { color: var(--green); }
-  .price.flash-down { color: var(--red); }
-  .chg { font-size:15px; font-weight:600; padding:3px 9px; border-radius:6px; }
-  .chg.up { color: var(--green); background: rgba(46,204,113,0.1); }
-  .chg.down { color: var(--red); background: rgba(239,68,68,0.1); }
-  .live-tag { font-size:11px; color:var(--green); border:1px solid rgba(46,204,113,0.35); background:rgba(46,204,113,0.08); padding:3px 8px; border-radius:100px; display:flex; align-items:center; gap:5px; }
-  .live-tag .dot2 { width:6px; height:6px; border-radius:50%; background:var(--green); animation: pulse 1.2s infinite; }
+@app.route("/healthz")
+def healthz():
+    return "ok"
 
-  .card { background: var(--card); border:1px solid var(--border); border-radius:16px; padding:20px; margin-bottom:16px; }
-  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:0.6px; color:var(--muted); margin:0 0 14px; font-weight:600; }
-  canvas { max-height:220px; }
-
-  .grid { display:grid; grid-template-columns: repeat(3,1fr); gap:12px; }
-  .stat { background:#0d0d0d; border:1px solid var(--border); border-radius:12px; padding:14px; }
-  .stat .label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; }
-  .stat .val { font-size:20px; font-weight:700; }
-
-  .regime-badge { display:inline-flex; align-items:center; gap:6px; padding:6px 14px; border-radius:100px; font-weight:700; font-size:13px; }
-  .regime-badge.LONG { background: rgba(46,204,113,0.12); color: var(--green); border:1px solid rgba(46,204,113,0.3); }
-  .regime-badge.SHORT { background: rgba(239,68,68,0.12); color: var(--red); border:1px solid rgba(239,68,68,0.3); }
-  .regime-badge.NONE { background: rgba(136,136,136,0.1); color: var(--muted); border:1px solid var(--border); }
-
-  .check-row { display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--border); font-size:13px; }
-  .check-row:last-child { border-bottom:none; }
-  .check-row .ok { color: var(--green); }
-  .check-row .no { color: var(--red); }
-
-  .setup-card { border:1px solid rgba(245,166,35,0.4); background: rgba(245,166,35,0.06); border-radius:16px; padding:20px; margin-bottom:16px; display:none; }
-  .setup-card.show { display:block; }
-  .setup-title { color: var(--amber); font-weight:700; font-size:13px; letter-spacing:0.4px; margin-bottom:14px; display:flex; align-items:center; gap:8px; }
-  .setup-grid { display:grid; grid-template-columns: repeat(2,1fr); gap:12px; margin-bottom:12px; }
-  .setup-stat .label { color:var(--muted); font-size:11px; text-transform:uppercase; margin-bottom:4px; }
-  .setup-stat .val { font-size:18px; font-weight:700; }
-  .setup-plan { font-size:12px; color:#ccc; border-top:1px solid rgba(245,166,35,0.25); padding-top:12px; margin-top:4px; line-height:1.5; }
-
-  .scan-wrap { display:flex; align-items:center; gap:10px; margin-top:6px; }
-  .scan-track { flex:1; height:4px; background:#1a1a1a; border-radius:100px; overflow:hidden; }
-  .scan-fill { height:100%; background: linear-gradient(90deg, var(--blue), #60a5fa); width:0%; transition: width 1s linear; }
-  .scan-label { font-size:11px; color:var(--muted); min-width:140px; text-align:right; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="top">
-    <div class="brand">
-      <div class="dot"></div>
-      <div>
-        <h1>ES Regime Scanner</h1>
-        <span>Linear regression channel · alert-only · paper trading</span>
-      </div>
-    </div>
-    <div class="badge-symbol"><b>ES=F</b> · CME E-mini S&amp;P 500</div>
-  </div>
-
-  <div class="price-row">
-    <div class="price" id="price">--</div>
-    <div class="chg" id="chg">--</div>
-    <div class="live-tag"><div class="dot2"></div>LIVE</div>
-  </div>
-
-  <div class="card">
-    <h2>Price · Last 150 Bars (5m)</h2>
-    <canvas id="chart"></canvas>
-  </div>
-
-  <div class="setup-card" id="setupCard">
-    <div class="setup-title">⚡ SETUP CONFIRMED — <span id="setupDir"></span></div>
-    <div class="setup-grid">
-      <div class="setup-stat"><div class="label">Entry</div><div class="val" id="setupEntry">--</div></div>
-      <div class="setup-stat"><div class="label">Stop</div><div class="val" id="setupStop">--</div></div>
-      <div class="setup-stat"><div class="label">Target 1</div><div class="val" id="setupTarget">--</div></div>
-      <div class="setup-stat"><div class="label">Suggested Size</div><div class="val" id="setupSize">--</div></div>
-    </div>
-    <div class="setup-plan" id="setupPlan"></div>
-  </div>
-
-  <div class="card">
-    <h2>1H Regime</h2>
-    <div style="margin-bottom:16px;"><span class="regime-badge NONE" id="regimeBadge">LOADING</span></div>
-    <div class="grid">
-      <div class="stat"><div class="label">Slope (pts/bar)</div><div class="val" id="slope">--</div></div>
-      <div class="stat"><div class="label">R²</div><div class="val" id="r2">--</div></div>
-      <div class="stat"><div class="label">Pullback Z</div><div class="val" id="z">--</div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>5m Confirmation Checklist</h2>
-    <div id="checks"><div class="check-row"><span>Loading...</span></div></div>
-  </div>
-
-  <div class="card">
-    <div class="scan-wrap">
-      <div class="scan-track"><div class="scan-fill" id="scanFill"></div></div>
-      <div class="scan-label" id="scanLabel">next regime scan in 60s</div>
-    </div>
-  </div>
-</div>
-
-<script>
-let chart;
-let lastPrice = null;
-const REGIME_POLL_SECONDS = 60;
-let secondsLeft = REGIME_POLL_SECONDS;
-
-function initChart(labels, data) {
-  const ctx = document.getElementById('chart').getContext('2d');
-  const gradient = ctx.createLinearGradient(0, 0, 0, 220);
-  gradient.addColorStop(0, 'rgba(59,130,246,0.35)');
-  gradient.addColorStop(1, 'rgba(59,130,246,0)');
-  chart = new Chart(ctx, {
-    type: 'line',
-    data: { labels: labels, datasets: [{ data: data, borderColor:'#3b82f6', backgroundColor:gradient, fill:true, tension:0.3, pointRadius:0, borderWidth:2 }] },
-    options: {
-      responsive:true, maintainAspectRatio:false,
-      plugins:{
-        legend:{display:false},
-        tooltip:{ callbacks:{ title: (items) => items[0].label } }
-      },
-      scales:{
-        x:{ ticks:{ color:'#666', maxTicksLimit:6, font:{size:10} }, grid:{ display:false } },
-        y:{ ticks:{ color:'#666', font:{size:10} }, grid:{ color:'#1a1a1a' } }
-      }
-    }
-  });
-}
-
-async function loadHistory() {
-  const res = await fetch('/api/history');
-  const d = await res.json();
-  if (d.error) return;
-  if (!chart) initChart(d.labels, d.closes);
-  else { chart.data.labels = d.labels; chart.data.datasets[0].data = d.closes; chart.update(); }
-}
-
-async function loadPrice() {
-  const res = await fetch('/api/price');
-  const d = await res.json();
-  if (d.error) return;
-  const priceEl = document.getElementById('price');
-  priceEl.innerText = d.price.toLocaleString();
-
-  if (lastPrice !== null) {
-    if (d.price > lastPrice) { priceEl.classList.remove('flash-down'); priceEl.classList.add('flash-up'); }
-    else if (d.price < lastPrice) { priceEl.classList.remove('flash-up'); priceEl.classList.add('flash-down'); }
-    setTimeout(() => priceEl.classList.remove('flash-up','flash-down'), 600);
-  }
-  lastPrice = d.price;
-
-  const chgEl = document.getElementById('chg');
-  const up = d.change >= 0;
-  chgEl.className = 'chg ' + (up ? 'up' : 'down');
-  chgEl.innerText = (up ? '+' : '') + d.change + ' (' + (up ? '+' : '') + d.change_pct + '%)';
-}
-
-async function loadStatus() {
-  const res = await fetch('/api/status');
-  const d = await res.json();
-  if (d.error) return;
-
-  document.getElementById('slope').innerText = d.slope;
-  document.getElementById('r2').innerText = d.r2;
-  document.getElementById('z').innerText = d.z;
-
-  const badge = document.getElementById('regimeBadge');
-  const dir = d.direction || 'NONE';
-  badge.className = 'regime-badge ' + dir;
-  badge.innerText = d.direction ? (d.direction + ' ZONE ARMED') : 'NO SETUP';
-
-  const checksDiv = document.getElementById('checks');
-  const entries = Object.entries(d.confirmations || {});
-  checksDiv.innerHTML = entries.length ? entries.map(([k,v]) =>
-    `<div class="check-row"><span>${k}</span><span class="${v?'ok':'no'}">${v?'✓ PASS':'✗ WAIT'}</span></div>`
-  ).join('') : '<div class="check-row"><span style="color:var(--muted)">No setup zone active — standing down</span></div>';
-
-  const setupCard = document.getElementById('setupCard');
-  if (d.confirmed && d.trade_setup) {
-    const s = d.trade_setup;
-    setupCard.classList.add('show');
-    document.getElementById('setupDir').innerText = s.direction;
-    document.getElementById('setupDir').style.color = s.direction === 'LONG' ? 'var(--green)' : 'var(--red)';
-    document.getElementById('setupEntry').innerText = s.entry;
-    document.getElementById('setupStop').innerText = s.stop;
-    document.getElementById('setupTarget').innerText = s.target1;
-    document.getElementById('setupSize').innerText = s.contracts + ' contract' + (s.contracts > 1 ? 's' : '') + ' (~$' + s.risk_usd.toLocaleString() + ' risk)';
-    document.getElementById('setupPlan').innerText = s.plan + ' Position size shown is a default placeholder — size to your own account risk tolerance.';
-  } else {
-    setupCard.classList.remove('show');
-  }
-}
-
-async function refreshRegime() {
-  await Promise.all([loadStatus(), loadHistory()]);
-  secondsLeft = REGIME_POLL_SECONDS;
-}
-
-function tick() {
-  loadPrice();
-  secondsLeft -= 1;
-  if (secondsLeft <= 0) { refreshRegime(); secondsLeft = REGIME_POLL_SECONDS; }
-  const pct = ((REGIME_POLL_SECONDS - secondsLeft) / REGIME_POLL_SECONDS) * 100;
-  document.getElementById('scanFill').style.width = pct + '%';
-  document.getElementById('scanLabel').innerText = 'next regime scan in ' + secondsLeft + 's';
-}
-
-loadPrice();
-refreshRegime();
-setInterval(tick, 5000);
-</script>
-</body>
-</html>
-"""
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5050)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
