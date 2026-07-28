@@ -121,6 +121,9 @@ a{color:inherit}
   border:1px solid #F2555A44;background:#F2555A0E;border-radius:5px;padding:4px 8px;
   margin:8px 6px 0 0}
 .alert .conf{float:right;font-weight:700;color:var(--amber)}
+.tfsel{background:var(--panel-solid);color:var(--text);border:1px solid var(--line);
+  border-radius:6px;font-family:var(--mono);font-size:11px;padding:4px 8px;cursor:pointer}
+.tfsel:focus{outline:1px solid var(--amber)}
 </style>
 </head>
 <body>
@@ -148,7 +151,16 @@ a{color:inherit}
 
   <div class="grid">
     <div class="card chart-card">
-      <h2>Price &middot; 5m closes <span class="tag" id="chartTag">regression channel: 1H dual 40/20</span></h2>
+      <h2>Price
+        <span style="display:flex;gap:10px;align-items:center">
+          <span class="tag" id="chartTag">regression channel: 1H dual 40/20</span>
+          <select id="tfSel" class="tfsel" aria-label="Chart timeframe">
+            <option value="5m" selected>5m</option>
+            <option value="15m">15m</option>
+            <option value="1h">1h</option>
+          </select>
+        </span>
+      </h2>
       <div id="chartWrap"><canvas id="chart"></canvas></div>
     </div>
 
@@ -264,9 +276,10 @@ function channelSeries(reg, t0ms, t1ms, k){
   return [{x:t0ms, y:val(t0ms)}, {x:t1ms, y:val(t1ms)}];
 }
 
+let chartTF = '5m';
 async function refreshChart(){
   try{
-    const r = await fetch('/api/chart'); const d = await r.json();
+    const r = await fetch('/api/chart?tf=' + chartTF); const d = await r.json();
     if(!d.chart.t.length) return;
     const pts = d.chart.t.map((t,i)=>({x:DT.fromISO(t).toMillis(), y:d.chart.c[i]}));
     const t0 = pts[0].x, t1 = pts[pts.length-1].x;
@@ -291,7 +304,7 @@ async function refreshChart(){
   }catch(e){ console.error(e); }
 }
 
-function setFeed(status, updatedIso){
+function setFeed(status, updatedIso, detail){
   const dot = $('feedDot'), txt = $('feedText');
   dot.className = 'dot ' + (status==='live'?'live':status==='stale'?'stale':'error');
   let ago = '';
@@ -299,13 +312,15 @@ function setFeed(status, updatedIso){
     const s = Math.max(0, Math.round((Date.now()-DT.fromISO(updatedIso).toMillis())/1000));
     ago = ` · ${s}s ago`;
   }
-  txt.textContent = (status==='live'?'LIVE':status==='stale'?'STALE FEED':'FEED ERROR') + ago;
+  const label = status==='live' ? 'LIVE' : status==='stale' ? 'STALE FEED' : 'FEED ERROR';
+  const why = (status!=='live' && detail) ? ` · ${detail.slice(0,80)}` : '';
+  txt.textContent = label + ago + why;
 }
 
 async function refreshStatus(){
   try{
     const r = await fetch('/api/status'); const d = await r.json();
-    setFeed(d.feed.status, d.price_updated);
+    setFeed(d.feed.status, d.price_updated, d.feed.detail);
 
     // price + real-time change flash
     if(d.last_price != null){
@@ -388,6 +403,7 @@ async function refreshStatus(){
 }
 
 buildChart();
+$('tfSel').addEventListener('change', e => { chartTF = e.target.value; refreshChart(); });
 refreshStatus(); refreshChart();
 setInterval(refreshStatus, 10000);   // price/status every 10s
 setInterval(refreshChart, 30000);    // chart + channel every 30s
