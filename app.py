@@ -43,8 +43,9 @@ from email.mime.text import MIMEText
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 
 # ----------------------------------------------------------------------
 # Config - env vars override where noted
@@ -83,7 +84,7 @@ LOCK = threading.Lock()
 STATE = {
     "last_price": None, "prev_close": None, "change_pts": None, "change_pct": None,
     "price_updated": None,
-    "chart": {"t": [], "c": []},
+    "charts": {"5m": {"t": [], "c": []}, "15m": {"t": [], "c": []}, "1h": {"t": [], "c": []}},
     "bias": None,            # direction, pct, factors[], slope, r2, z, lookback, ...
     "setup": None,           # {direction, armed_at, expires_at}  when armed
     "trigger": None,         # factors[], mandatory_ok
@@ -392,15 +393,66 @@ def maybe_alert(direction, conf, bias, trig):
 # ----------------------------------------------------------------------
 # Data + scanner loop
 # ----------------------------------------------------------------------
+YH_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+YH_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+_yh_session = requests.Session()
+_yh_session.headers.update(YH_HEADERS)
+
+
+def yahoo_chart(interval: str, range_: str) -> pd.DataFrame:
+    """Direct Yahoo v8 chart API - far more reliable from datacenter IPs
+    than the yfinance session, and one lightweight request per call."""
+    last_err = None
+    for attempt, host in enumerate(YH_HOSTS * 2):
+        try:
+            url = (f"https://{host}/v8/finance/chart/{requests.utils.quote(SYMBOL)}"
+                   f"?interval={interval}&range={range_}"
+                   f"&includePrePost=true&events=div%2Csplit")
+            r = _yh_session.get(url, timeout=15)
+            if r.status_code == 429:
+                raise RuntimeError("HTTP 429 rate limited")
+            r.raise_for_status()
+            res = r.json()["chart"]["result"][0]
+            ts = res.get("timestamp")
+            q = res["indicators"]["quote"][0]
+            if not ts:
+                raise RuntimeError("no timestamps in response")
+            df = pd.DataFrame(
+                {"Open": q["open"], "High": q["high"], "Low": q["low"],
+                 "Close": q["close"], "Volume": q["volume"]},
+                index=pd.to_datetime(ts, unit="s", utc=True),
+            ).dropna(subset=["Close"])
+            if len(df) < 5:
+                raise RuntimeError(f"empty {interval} response")
+            df["Volume"] = df["Volume"].fillna(0)
+            return df
+        except Exception as e:
+            last_err = e
+            time.sleep(1.5 * (attempt + 1))   # backoff before next host/retry
+    raise RuntimeError(f"yahoo chart api failed: {last_err}")
+
+
 def fetch(interval: str, period: str) -> pd.DataFrame:
-    df = yf.download(SYMBOL, interval=interval, period=period,
-                     progress=False, prepost=True, auto_adjust=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df = df.dropna(subset=["Close"])
-    if len(df) < 5:
-        raise RuntimeError(f"empty {interval} response")
-    return df
+    try:
+        return yahoo_chart(interval, period)
+    except Exception as primary_err:
+        try:  # fallback: yfinance
+            df = yf.download(SYMBOL, interval=interval, period=period,
+                             progress=False, prepost=True, auto_adjust=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df = df.dropna(subset=["Close"])
+            if len(df) < 5:
+                raise RuntimeError(f"empty {interval} response")
+            return df
+        except Exception:
+            raise primary_err
 
 
 def scanner_loop():
@@ -459,9 +511,16 @@ def scanner_loop():
                     STATE["prev_close"] = round(prev_close, 2)
                     STATE["change_pts"] = round(last_price - prev_close, 2)
                     STATE["change_pct"] = round((last_price / prev_close - 1) * 100, 2)
-                tail = idx[-CHART_BARS:]
-                STATE["chart"] = {"t": [t.isoformat() for t in tail],
-                                  "c": [round(float(v), 2) for v in closes.iloc[-CHART_BARS:]]}
+                def series(frame):
+                    fidx = (frame.index.tz_convert("UTC") if frame.index.tz
+                            else frame.index.tz_localize("UTC"))[-CHART_BARS:]
+                    return {"t": [t.isoformat() for t in fidx],
+                            "c": [round(float(v), 2)
+                                  for v in frame["Close"].iloc[-CHART_BARS:]]}
+                m15 = ltf.resample("15min").agg(
+                    {"Close": "last"}).dropna(subset=["Close"])
+                STATE["charts"] = {"5m": series(ltf), "15m": series(m15),
+                                   "1h": series(htf)}
                 STATE["bias"], STATE["avoid"] = bias, avoid
                 STATE["setup"] = setup
                 STATE["trigger"] = ({"factors": trig["factors"],
@@ -530,8 +589,12 @@ def api_status():
 
 @app.route("/api/chart")
 def api_chart():
+    tf = request.args.get("tf", "5m")
+    if tf not in ("5m", "15m", "1h"):
+        tf = "5m"
     with LOCK:
-        return jsonify({"chart": STATE["chart"], "regime": STATE["bias"]})
+        return jsonify({"tf": tf, "chart": STATE["charts"].get(tf, {"t": [], "c": []}),
+                        "regime": STATE["bias"]})
 
 
 @app.route("/healthz")
