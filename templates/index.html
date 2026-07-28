@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ES Regime Scanner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+<style>
+:root{
+  --bg:#0B0E14; --panel:#12172250; --panel-solid:#121722; --line:#232B3D;
+  --text:#E8EAF2; --muted:#7A8299; --dim:#4A5268;
+  --amber:#E8B25B; --amber-dim:#E8B25B33;
+  --long:#3DD68C; --short:#F2555A;
+  --mono:'JetBrains Mono',monospace; --sans:'Archivo',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:var(--bg)}
+body{
+  font-family:var(--sans);color:var(--text);min-height:100vh;
+  background:
+    radial-gradient(1200px 500px at 70% -10%, #1A223A66, transparent),
+    var(--bg);
+}
+a{color:inherit}
+.wrap{max-width:1240px;margin:0 auto;padding:0 20px 48px}
+
+/* top bar */
+.topbar{display:flex;align-items:center;justify-content:space-between;
+  padding:16px 0;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:baseline;gap:10px}
+.brand h1{font-size:15px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}
+.brand .sub{font-size:11px;color:var(--muted);letter-spacing:.06em}
+.feed{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim)}
+.dot.live{background:var(--long);box-shadow:0 0 0 0 #3DD68C99;animation:pulse 2s infinite}
+.dot.stale{background:var(--amber)} .dot.error{background:var(--short)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 #3DD68C66}70%{box-shadow:0 0 0 9px #3DD68C00}100%{box-shadow:0 0 0 0 #3DD68C00}}
+@media (prefers-reduced-motion: reduce){.dot.live{animation:none}.px-flash{transition:none!important}}
+
+/* ticker */
+.ticker{display:flex;flex-wrap:wrap;align-items:flex-end;gap:24px;padding:26px 0 22px}
+.ticker .sym{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.1em;margin-bottom:8px}
+.px{font-family:var(--mono);font-size:56px;font-weight:700;line-height:1;letter-spacing:-.01em;
+  transition:color .35s}
+.px-flash.up{color:var(--long)} .px-flash.down{color:var(--short)}
+.chg{font-family:var(--mono);font-size:16px;font-weight:500;padding:6px 12px;border-radius:6px;
+  border:1px solid var(--line);margin-bottom:6px}
+.chg.up{color:var(--long);border-color:#3DD68C44;background:#3DD68C11}
+.chg.down{color:var(--short);border-color:#F2555A44;background:#F2555A11}
+.tick-meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:9px}
+
+/* layout */
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px}
+@media(max-width:960px){.grid{grid-template-columns:1fr}.px{font-size:42px}}
+.card{background:var(--panel-solid);border:1px solid var(--line);border-radius:10px;padding:18px}
+.card h2{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:14px;display:flex;justify-content:space-between;align-items:center}
+.card h2 .tag{font-family:var(--mono);font-size:10px;letter-spacing:0;text-transform:none;color:var(--dim)}
+
+/* chart */
+.chart-card{grid-row:span 3}
+#chartWrap{position:relative;height:440px}
+@media(max-width:960px){ #chartWrap{height:320px} }
+
+/* regime */
+.metric-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px}
+.metric{border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.metric .k{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.metric .v{font-family:var(--mono);font-size:20px;font-weight:600;margin-top:4px}
+.metric .v.ok{color:var(--amber)}
+.badge{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:13px;
+  font-weight:700;letter-spacing:.08em;padding:8px 14px;border-radius:6px;border:1px solid var(--line);color:var(--muted)}
+.badge.long{color:var(--long);border-color:#3DD68C55;background:#3DD68C14}
+.badge.short{color:var(--short);border-color:#F2555A55;background:#F2555A14}
+.badge.armed{color:var(--amber);border-color:#E8B25B55;background:#E8B25B14}
+.zone-note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
+
+/* checklist */
+.check{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);
+  font-family:var(--mono);font-size:12.5px}
+.check:last-child{border-bottom:0}
+.check .box{width:16px;height:16px;border-radius:4px;border:1px solid var(--dim);
+  display:flex;align-items:center;justify-content:center;font-size:11px;flex:none}
+.check.pass .box{border-color:var(--long);color:var(--long)}
+.check.pass{color:var(--text)} .check{color:var(--muted)}
+.empty{font-size:12px;color:var(--dim);font-family:var(--mono);padding:6px 0;line-height:1.6}
+
+/* alerts */
+.alert-count{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.alert{border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:6px;
+  padding:10px 12px;margin-bottom:8px;font-family:var(--mono);font-size:12px}
+.alert .dirn{font-weight:700}
+.alert .dirn.LONG{color:var(--long)} .alert .dirn.SHORT{color:var(--short)}
+.alert .plan{color:var(--muted);margin-top:4px;font-size:11px;line-height:1.5}
+.alert .when{color:var(--dim);font-size:10px;margin-top:4px}
+
+.footnote{margin-top:20px;font-size:11px;color:var(--dim);font-family:var(--mono);line-height:1.7}
+
+/* v2: factors, confidence, avoid */
+.factor{display:flex;align-items:center;gap:9px;padding:6px 0;border-bottom:1px solid var(--line);
+  font-family:var(--mono);font-size:12px;color:var(--muted)}
+.factor:last-child{border-bottom:0}
+.factor .box{width:15px;height:15px;border-radius:4px;border:1px solid var(--dim);flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:10px}
+.factor.pass{color:var(--text)} .factor.pass .box{border-color:var(--long);color:var(--long)}
+.factor.fail .box{border-color:var(--short);color:var(--short)}
+.factor.na{opacity:.45} .factor.na .box{border-style:dashed}
+.factor .det{margin-left:auto;font-size:10px;color:var(--dim)}
+.confbar{position:relative;height:10px;border-radius:6px;background:#1A2133;
+  border:1px solid var(--line);overflow:hidden;margin-bottom:8px}
+.conffill{height:100%;width:0;background:linear-gradient(90deg,#4A5268,var(--amber));
+  transition:width .5s}
+.conffill.hot{background:linear-gradient(90deg,var(--amber),var(--long))}
+.confmin{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--text);opacity:.5}
+.confread{font-family:var(--mono);font-size:22px;font-weight:700;margin-bottom:10px}
+.avoid-chip{display:inline-block;font-family:var(--mono);font-size:10.5px;color:var(--short);
+  border:1px solid #F2555A44;background:#F2555A0E;border-radius:5px;padding:4px 8px;
+  margin:8px 6px 0 0}
+.alert .conf{float:right;font-weight:700;color:var(--amber)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="brand">
+      <h1>ES Regime Scanner</h1>
+      <span class="sub">linear regression channel &middot; alert-only &middot; paper</span>
+    </div>
+    <div class="feed">
+      <span class="dot" id="feedDot"></span>
+      <span id="feedText">connecting…</span>
+    </div>
+  </div>
+
+  <div class="ticker">
+    <div>
+      <div class="sym">{{ symbol }} &middot; CME E-MINI S&amp;P 500 &middot; RTH + ETH</div>
+      <div class="px px-flash" id="lastPx">——.—</div>
+    </div>
+    <div class="chg" id="chg">— pts (—%)</div>
+    <div class="tick-meta" id="tickMeta">vs prior settle —</div>
+  </div>
+
+  <div class="grid">
+    <div class="card chart-card">
+      <h2>Price &middot; 5m closes <span class="tag" id="chartTag">regression channel: 1H dual 40/20</span></h2>
+      <div id="chartWrap"><canvas id="chart"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2>1H Bias <span class="tag" id="regimeUpdated"></span></h2>
+      <div class="metric-row">
+        <div class="metric"><div class="k">Slope pts/bar</div><div class="v" id="mSlope">—</div></div>
+        <div class="metric"><div class="k">R&sup2;</div><div class="v" id="mR2">—</div></div>
+        <div class="metric"><div class="k">Pullback z</div><div class="v" id="mZ">—</div></div>
+      </div>
+      <span class="badge" id="regimeBadge">SCANNING</span>
+      <div id="biasFactors" style="margin-top:12px"></div>
+      <div class="zone-note" id="zoneNote">Waiting for first evaluation…</div>
+    </div>
+
+    <div class="card">
+      <h2>Signal Confidence <span class="tag" id="confTag">fires at ≥ 75%</span></h2>
+      <div class="confbar"><div class="conffill" id="confFill"></div><div class="confmin" id="confMin"></div></div>
+      <div class="confread" id="confRead">— %</div>
+      <div id="trigFactors"><div class="empty">Trigger checklist activates while a pullback setup is armed.</div></div>
+      <div id="avoidList"></div>
+    </div>
+
+    <div class="card">
+      <h2>Alerts <span class="alert-count" id="alertCount">0 / 2 today</span></h2>
+      <div id="alerts"><div class="empty">No alerts yet. The scanner stays silent unless bias, pullback, trigger and confidence all clear — expect roughly one setup every 1–2 days, sometimes none.</div></div>
+    </div>
+  </div>
+
+  <div class="footnote">
+    Alert engine: 10&nbsp;pt stop &middot; scale &frac12; at +10 &middot; stop&rarr;BE &middot; trail runner on 5m swings &middot; max 2/day &middot; 120&nbsp;min cooldown.<br>
+    Data: Yahoo Finance (may lag ~1&ndash;2 min). Signals are decision support for manual paper trading — nothing here places orders.
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const DT = luxon.DateTime;
+let chart, lastPrice = null;
+
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+function fmt(n, d=2){ return n==null ? '—' : Number(n).toFixed(d); }
+function fRow(f){
+  const cls = f.na ? 'na' : (f.ok ? 'pass' : 'fail');
+  const mark = f.na ? '–' : (f.ok ? '✓' : '✗');
+  return `<div class="factor ${cls}"><span class="box">${mark}</span>${f.name}` +
+         (f.detail ? `<span class="det">${f.detail}</span>` : '') + `</div>`;
+}
+
+function buildChart(){
+  const ctx = $('chart').getContext('2d');
+  chart = new Chart(ctx, {
+    type:'line',
+    data:{datasets:[
+      {label:'ES 5m close', data:[], parsing:false, borderColor:css('--text'),
+       borderWidth:1.6, pointRadius:0, pointHitRadius:6, tension:0, order:1},
+      {label:'LR mid', data:[], parsing:false, borderColor:css('--amber'),
+       borderWidth:1.4, pointRadius:0, borderDash:[], order:2},
+      {label:'+1σ', data:[], parsing:false, borderColor:css('--amber')+'88',
+       borderWidth:1, pointRadius:0, borderDash:[5,4], order:3},
+      {label:'-1σ', data:[], parsing:false, borderColor:css('--amber')+'88',
+       borderWidth:1, pointRadius:0, borderDash:[5,4], order:4},
+      {label:'+2.5σ', data:[], parsing:false, borderColor:css('--amber')+'44',
+       borderWidth:1, pointRadius:0, borderDash:[2,4], order:5},
+      {label:'-2.5σ', data:[], parsing:false, borderColor:css('--amber')+'44',
+       borderWidth:1, pointRadius:0, borderDash:[2,4], order:6},
+      // shaded setup zone: zoneA (outer edge) filled to zoneB (inner edge)
+      {label:'zoneB', data:[], parsing:false, borderWidth:0, pointRadius:0, order:8},
+      {label:'setup zone', data:[], parsing:false, borderWidth:0, pointRadius:0,
+       backgroundColor:css('--amber-dim'), fill:'-1', order:7},
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{mode:'nearest', intersect:false},
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          backgroundColor:'#121722', borderColor:css('--line'), borderWidth:1,
+          titleFont:{family:'JetBrains Mono', size:11},
+          bodyFont:{family:'JetBrains Mono', size:12},
+          filter: i => i.datasetIndex === 0,
+          callbacks:{
+            title: items => items.length ? DT.fromMillis(items[0].parsed.x)
+              .toFormat('ccc dd LLL yyyy · HH:mm') : '',
+            label: i => ' ' + i.parsed.y.toFixed(2)
+          }
+        }
+      },
+      scales:{
+        x:{type:'time',
+           time:{tooltipFormat:'dd LLL HH:mm',
+                 displayFormats:{hour:'HH:mm', day:'dd LLL'}},
+           grid:{color:'#1A2133'},
+           ticks:{color:css('--muted'), font:{family:'JetBrains Mono', size:10},
+                  maxRotation:0, autoSkipPadding:24},
+           title:{display:true, text:'Time · date', color:css('--dim'),
+                  font:{family:'Archivo', size:10}}},
+        y:{position:'right', grid:{color:'#1A2133'},
+           ticks:{color:css('--muted'), font:{family:'JetBrains Mono', size:11},
+                  callback:v=>v.toFixed(0)},
+           title:{display:true, text:'ES price (pts)', color:css('--dim'),
+                  font:{family:'Archivo', size:10}}}
+      }
+    }
+  });
+}
+
+function channelSeries(reg, t0ms, t1ms, k){
+  // regression line in time-space: slope is pts per 1h bar ≈ pts per hour
+  const anchor = DT.fromISO(reg.fitted_last_ts).toMillis();
+  const val = t => reg.fitted_last + reg.slope * ((t - anchor) / 3600000) + k * reg.resid_std;
+  return [{x:t0ms, y:val(t0ms)}, {x:t1ms, y:val(t1ms)}];
+}
+
+async function refreshChart(){
+  try{
+    const r = await fetch('/api/chart'); const d = await r.json();
+    if(!d.chart.t.length) return;
+    const pts = d.chart.t.map((t,i)=>({x:DT.fromISO(t).toMillis(), y:d.chart.c[i]}));
+    const t0 = pts[0].x, t1 = pts[pts.length-1].x;
+    chart.data.datasets[0].data = pts;
+    const reg = d.regime;
+    if(reg){
+      chart.data.datasets[1].data = channelSeries(reg,t0,t1,0);
+      chart.data.datasets[2].data = channelSeries(reg,t0,t1, 1);
+      chart.data.datasets[3].data = channelSeries(reg,t0,t1,-1);
+      chart.data.datasets[4].data = channelSeries(reg,t0,t1, 2.5);
+      chart.data.datasets[5].data = channelSeries(reg,t0,t1,-2.5);
+      // shade the active pullback zone (midline +0.25σ down to −2.75σ, trend-relative)
+      if(reg.quality_ok && reg.trend !== 'FLAT'){
+        const sgn = reg.trend === 'UP' ? -1 : 1;   // pullback side is against the trend
+        chart.data.datasets[6].data = channelSeries(reg,t0,t1, -sgn*0.25);
+        chart.data.datasets[7].data = channelSeries(reg,t0,t1, sgn*2.75);
+      } else {
+        chart.data.datasets[6].data = []; chart.data.datasets[7].data = [];
+      }
+    }
+    chart.update('none');
+  }catch(e){ console.error(e); }
+}
+
+function setFeed(status, updatedIso){
+  const dot = $('feedDot'), txt = $('feedText');
+  dot.className = 'dot ' + (status==='live'?'live':status==='stale'?'stale':'error');
+  let ago = '';
+  if(updatedIso){
+    const s = Math.max(0, Math.round((Date.now()-DT.fromISO(updatedIso).toMillis())/1000));
+    ago = ` · ${s}s ago`;
+  }
+  txt.textContent = (status==='live'?'LIVE':status==='stale'?'STALE FEED':'FEED ERROR') + ago;
+}
+
+async function refreshStatus(){
+  try{
+    const r = await fetch('/api/status'); const d = await r.json();
+    setFeed(d.feed.status, d.price_updated);
+
+    // price + real-time change flash
+    if(d.last_price != null){
+      const el = $('lastPx');
+      if(lastPrice != null && d.last_price !== lastPrice){
+        el.classList.remove('up','down'); void el.offsetWidth;
+        el.classList.add(d.last_price > lastPrice ? 'up' : 'down');
+        setTimeout(()=>el.classList.remove('up','down'), 700);
+      }
+      el.textContent = d.last_price.toFixed(2);
+      lastPrice = d.last_price;
+    }
+    if(d.change_pts != null){
+      const up = d.change_pts >= 0, c = $('chg');
+      c.className = 'chg ' + (up?'up':'down');
+      c.textContent = `${up?'+':''}${d.change_pts.toFixed(2)} pts (${up?'+':''}${d.change_pct.toFixed(2)}%)`;
+      $('tickMeta').textContent = `vs prior settle ${fmt(d.prev_close)}`;
+    }
+
+    // bias
+    const reg = d.bias;
+    if(reg){
+      $('mSlope').textContent = (reg.slope>0?'+':'') + reg.slope.toFixed(2);
+      $('mSlope').className = 'v' + (Math.abs(reg.slope)>=d.params.min_slope?' ok':'');
+      $('mR2').textContent = reg.r2.toFixed(2) + '·' + reg.lookback;
+      $('mR2').className = 'v' + (reg.r2>=d.params.min_r2?' ok':'');
+      $('mZ').textContent = (reg.z>0?'+':'') + reg.z.toFixed(2);
+      $('regimeUpdated').textContent = 'upd ' + DT.fromISO(reg.updated).toFormat('HH:mm');
+      const b = $('regimeBadge');
+      if(d.setup){
+        b.className='badge '+d.setup.direction.toLowerCase();
+        b.textContent=`${d.setup.direction} SETUP ARMED · ${Math.ceil(d.setup.expires_in/3600)}h left`;
+      } else if(reg.quality_ok){
+        b.className='badge armed';
+        b.textContent=`${reg.direction} BIAS ${reg.pct.toFixed(0)}% · AWAITING PULLBACK`;
+      } else {
+        b.className='badge'; b.textContent='NO EDGE · STANDING DOWN';
+      }
+      $('biasFactors').innerHTML = reg.factors.map(fRow).join('');
+      $('zoneNote').textContent = reg.quality_ok
+        ? `Bias ${reg.pct.toFixed(0)}% (needs ${d.params.bias_min_pct}%). Setup arms when price pulls back to the regression midline; stays armed 8h awaiting trigger.`
+        : `Bias score ${reg.pct.toFixed(0)}% — needs ${d.params.bias_min_pct}%+ with a real slope. Chop = no trade.`;
+    }
+
+    // confidence + trigger factors + avoid
+    $('confTag').textContent = `fires at ≥ ${d.params.conf_min}%`;
+    const fill = $('confFill');
+    $('confMin').style.left = d.params.conf_min + '%';
+    if(d.confidence != null){
+      fill.style.width = Math.min(100, d.confidence) + '%';
+      fill.className = 'conffill' + (d.confidence >= d.params.conf_min ? ' hot' : '');
+      $('confRead').textContent = d.confidence.toFixed(0) + ' %';
+    } else {
+      fill.style.width = '0%'; fill.className='conffill';
+      $('confRead').textContent = '— %';
+    }
+    if(d.trigger){
+      $('trigFactors').innerHTML = d.trigger.factors.map(fRow).join('');
+    } else {
+      $('trigFactors').innerHTML = '<div class="empty">Trigger checklist activates while a pullback setup is armed.</div>';
+    }
+    $('avoidList').innerHTML = (d.avoid||[]).map(a=>`<span class="avoid-chip">⛔ ${a}</span>`).join('');
+
+    // alerts
+    $('alertCount').textContent = `${d.alerts_today} / ${d.max_alerts} today` +
+      (d.cooldown_remaining>0 ? ` · cooldown ${Math.ceil(d.cooldown_remaining/60)}m` : '');
+    if(d.alerts.length){
+      $('alerts').innerHTML = d.alerts.map(a=>`
+        <div class="alert">
+          <span class="conf">${a.confidence}%</span>
+          <span class="dirn ${a.direction}">${a.direction}</span> @ ${a.entry.toFixed(2)}
+          <div class="plan">stop ${a.stop.toFixed(2)} · scale ½ at ${a.t1.toFixed(2)} · BE · trail runner</div>
+          <div class="plan">${a.factors.filter(f=>f.ok).map(f=>'✓ '+f.name).join('<br>')}</div>
+          <div class="when">${DT.fromISO(a.ts).toFormat('ccc dd LLL · HH:mm')} UTC</div>
+        </div>`).join('');
+    }
+  }catch(e){
+    setFeed('error', null); console.error(e);
+  }
+}
+
+buildChart();
+refreshStatus(); refreshChart();
+setInterval(refreshStatus, 10000);   // price/status every 10s
+setInterval(refreshChart, 30000);    // chart + channel every 30s
+</script>
+</body>
+</html>
