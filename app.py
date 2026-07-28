@@ -92,6 +92,7 @@ STATE = {
     "confidence": None,
     "alerts": [], "alerts_today": 0, "alerts_date": "", "last_alert_ts": 0.0,
     "feed": {"status": "starting", "detail": "", "errors": 0},
+    "loop": {"n": 0, "phase": "boot", "ts": None},
 }
 
 
@@ -409,12 +410,12 @@ def yahoo_chart(interval: str, range_: str) -> pd.DataFrame:
     """Direct Yahoo v8 chart API - far more reliable from datacenter IPs
     than the yfinance session, and one lightweight request per call."""
     last_err = None
-    for attempt, host in enumerate(YH_HOSTS * 2):
+    for attempt, host in enumerate(YH_HOSTS + YH_HOSTS[:1]):
         try:
             url = (f"https://{host}/v8/finance/chart/{requests.utils.quote(SYMBOL)}"
                    f"?interval={interval}&range={range_}"
                    f"&includePrePost=true&events=div%2Csplit")
-            r = _yh_session.get(url, timeout=15)
+            r = _yh_session.get(url, timeout=10)
             if r.status_code == 429:
                 raise RuntimeError("HTTP 429 rate limited")
             r.raise_for_status()
@@ -455,15 +456,25 @@ def fetch(interval: str, period: str) -> pd.DataFrame:
             raise primary_err
 
 
+def mark(phase, bump=False):
+    with LOCK:
+        if bump:
+            STATE["loop"]["n"] += 1
+        STATE["loop"]["phase"] = phase
+        STATE["loop"]["ts"] = datetime.now(timezone.utc).isoformat()
+
+
 def scanner_loop():
     last_slow, htf = 0.0, None
     while True:
         try:
+            mark("fetch 5m", bump=True)
             ltf = fetch("5m", "2d")
             closes = ltf["Close"]
             last_price = float(closes.iloc[-1])
             idx = ltf.index.tz_convert("UTC") if ltf.index.tz else ltf.index.tz_localize("UTC")
 
+            mark("fetch daily")
             try:
                 daily = fetch("1d", "5d")
                 prev_close = float(daily["Close"].iloc[-2])
@@ -471,9 +482,11 @@ def scanner_loop():
                 prev_close = STATE["prev_close"]
 
             if htf is None or time.time() - last_slow >= POLL_SLOW:
+                mark("fetch 1h")
                 htf = fetch("1h", "60d")
                 last_slow = time.time()
 
+            mark("evaluate")
             bias = eval_bias(htf, ltf)
             avoid = eval_avoid(htf, ltf, bias)
 
@@ -536,6 +549,7 @@ def scanner_loop():
             print(f"[error] scanner: {e}")
             traceback.print_exc()
 
+        mark("sleep")
         time.sleep(POLL_FAST)
 
 
@@ -580,7 +594,7 @@ def api_status():
             "cooldown_remaining": max(0, int(COOLDOWN_MIN * 60 -
                                              (time.time() - STATE["last_alert_ts"])))
             if STATE["last_alert_ts"] else 0,
-            "feed": STATE["feed"],
+            "feed": STATE["feed"], "loop": STATE["loop"],
             "params": {"min_r2": MIN_R2, "min_slope": MIN_SLOPE,
                        "bias_min_pct": BIAS_MIN_PCT, "conf_min": CONF_MIN,
                        "stop_pts": STOP_PTS, "target1_pts": TARGET1_PTS},
@@ -595,6 +609,27 @@ def api_chart():
     with LOCK:
         return jsonify({"tf": tf, "chart": STATE["charts"].get(tf, {"t": [], "c": []}),
                         "regime": STATE["bias"]})
+
+
+@app.route("/api/debug")
+def api_debug():
+    """One-shot Yahoo connectivity probe from this server, per host."""
+    out = {"hosts": {}, "loop": STATE["loop"], "feed": STATE["feed"]}
+    for host in YH_HOSTS:
+        try:
+            url = (f"https://{host}/v8/finance/chart/"
+                   f"{requests.utils.quote(SYMBOL)}?interval=5m&range=1d")
+            r = _yh_session.get(url, timeout=10)
+            body = r.text[:120].replace("\n", " ")
+            n = 0
+            try:
+                n = len(r.json()["chart"]["result"][0].get("timestamp") or [])
+            except Exception:
+                pass
+            out["hosts"][host] = {"http": r.status_code, "bars": n, "head": body}
+        except Exception as e:
+            out["hosts"][host] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
+    return jsonify(out)
 
 
 @app.route("/healthz")
