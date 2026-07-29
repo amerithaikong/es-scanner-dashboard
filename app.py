@@ -395,6 +395,10 @@ def maybe_alert(direction, conf, bias, trig):
 # Data + scanner loop
 # ----------------------------------------------------------------------
 YH_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+# Optional relay (e.g. Cloudflare Worker) that forwards /v8/finance/chart/* to
+# Yahoo from a non-blocked IP. Set YH_PROXY in Render's Environment tab.
+YH_PROXY = os.environ.get("YH_PROXY", "").rstrip("/")
+YH_BASES = ([YH_PROXY] if YH_PROXY else []) + [f"https://{h}" for h in YH_HOSTS]
 YH_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -410,9 +414,9 @@ def yahoo_chart(interval: str, range_: str) -> pd.DataFrame:
     """Direct Yahoo v8 chart API - far more reliable from datacenter IPs
     than the yfinance session, and one lightweight request per call."""
     last_err = None
-    for attempt, host in enumerate(YH_HOSTS + YH_HOSTS[:1]):
+    for attempt, base in enumerate(YH_BASES + YH_BASES[:1]):
         try:
-            url = (f"https://{host}/v8/finance/chart/{requests.utils.quote(SYMBOL)}"
+            url = (f"{base}/v8/finance/chart/{requests.utils.quote(SYMBOL)}"
                    f"?interval={interval}&range={range_}"
                    f"&includePrePost=true&events=div%2Csplit")
             r = _yh_session.get(url, timeout=10)
@@ -614,10 +618,11 @@ def api_chart():
 @app.route("/api/debug")
 def api_debug():
     """One-shot Yahoo connectivity probe from this server, per host."""
-    out = {"hosts": {}, "loop": STATE["loop"], "feed": STATE["feed"]}
-    for host in YH_HOSTS:
+    out = {"hosts": {}, "proxy_configured": bool(YH_PROXY),
+           "loop": STATE["loop"], "feed": STATE["feed"]}
+    for base in YH_BASES:
         try:
-            url = (f"https://{host}/v8/finance/chart/"
+            url = (f"{base}/v8/finance/chart/"
                    f"{requests.utils.quote(SYMBOL)}?interval=5m&range=1d")
             r = _yh_session.get(url, timeout=10)
             body = r.text[:120].replace("\n", " ")
@@ -626,9 +631,9 @@ def api_debug():
                 n = len(r.json()["chart"]["result"][0].get("timestamp") or [])
             except Exception:
                 pass
-            out["hosts"][host] = {"http": r.status_code, "bars": n, "head": body}
+            out["hosts"][base] = {"http": r.status_code, "bars": n, "head": body}
         except Exception as e:
-            out["hosts"][host] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
+            out["hosts"][base] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
     return jsonify(out)
 
 
