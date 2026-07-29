@@ -306,14 +306,17 @@ async function refreshChart(){
 
 function setFeed(status, updatedIso, detail){
   const dot = $('feedDot'), txt = $('feedText');
-  dot.className = 'dot ' + (status==='live'?'live':status==='stale'?'stale':'error');
+  const cls = status==='live' ? 'live' : status==='stale' ? 'stale'
+            : status==='starting' ? 'stale' : 'error';
+  dot.className = 'dot ' + cls;
   let ago = '';
   if(updatedIso){
     const s = Math.max(0, Math.round((Date.now()-DT.fromISO(updatedIso).toMillis())/1000));
     ago = ` · ${s}s ago`;
   }
-  const label = status==='live' ? 'LIVE' : status==='stale' ? 'STALE FEED' : 'FEED ERROR';
-  const why = (status!=='live' && detail) ? ` · ${detail.slice(0,80)}` : '';
+  const label = status==='live' ? 'LIVE' : status==='stale' ? 'STALE FEED'
+              : status==='starting' ? 'WARMING UP · first scan ~1 min' : 'FEED ERROR';
+  const why = (status!=='live' && status!=='starting' && detail) ? ` · ${detail.slice(0,80)}` : '';
   txt.textContent = label + ago + why;
 }
 
