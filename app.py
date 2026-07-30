@@ -652,11 +652,9 @@ start_scanner()
 # ----------------------------------------------------------------------
 # Routes
 # ----------------------------------------------------------------------
-@app.after_request
-def no_store(resp):
-    if request.path.startswith("/api/") or request.path == "/healthz":
-        resp.headers["Cache-Control"] = "no-store, max-age=0"
-    return resp
+@app.before_request
+def _ensure_scanner():
+    start_scanner()
   
 @app.route("/")
 def index():
