@@ -518,7 +518,7 @@ def mark(phase, bump=False):
 
 
 def scanner_loop():
-  print(f"[boot] pid {os.getpid()} scanner starting", flush=True)
+    print(f"[boot] pid {os.getpid()} scanner starting", flush=True)
     last_slow, htf, prev_close = 0.0, None, None
     while True:
         try:
