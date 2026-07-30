@@ -422,8 +422,34 @@ YH_HEADERS = {
 _yh_session = requests.Session()
 _yh_session.headers.update(YH_HEADERS)
 
+# Scanner gets its OWN session: requests.Session is not thread-safe
+_scanner_session = requests.Session()
+_scanner_session.headers.update(YH_HEADERS)
 
-def yahoo_chart(interval: str, range_: str) -> pd.DataFrame:
+
+def get_with_deadline(session, url, deadline=25):
+    """GET that CANNOT hang: requests' timeout doesn't cover DNS resolution,
+    so run the request in a disposable thread and abandon it past deadline."""
+    result = {}
+
+    def _run():
+        try:
+            result["r"] = session.get(url, timeout=10)
+        except Exception as e:
+            result["e"] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(deadline)
+    if t.is_alive():
+        raise RuntimeError(f"request exceeded {deadline}s hard deadline "
+                           f"(DNS or socket stall)")
+    if "e" in result:
+        raise result["e"]
+    return result["r"]
+  
+def yahoochart(interval: str, range: str, session=None) -> pd.DataFrame:
+  session = session or _yh_session
     """Direct Yahoo v8 chart API via proxy/hosts. Every request has a hard
     10s timeout, so a dead connection can never hang the scanner thread."""
     last_err = None
@@ -432,7 +458,7 @@ def yahoo_chart(interval: str, range_: str) -> pd.DataFrame:
             url = (f"{base}/v8/finance/chart/{requests.utils.quote(SYMBOL)}"
                    f"?interval={interval}&range={range_}"
                    f"&includePrePost=true&events=div%2Csplit")
-            r = _yh_session.get(url, timeout=10)
+            r = get_with_deadline(session, url)
             if r.status_code == 429:
                 raise RuntimeError("HTTP 429 rate limited")
             r.raise_for_status()
@@ -460,7 +486,7 @@ def fetch(interval: str, period: str) -> pd.DataFrame:
     # yfinance fallback removed: from this server's IP the direct Yahoo hosts
     # are hard 429-blocked, so yf.download() could never succeed - and it has
     # no request timeout, which is what silently froze the scanner thread.
-    return yahoo_chart(interval, period)
+    return yahoo_chart(interval, period, session =_scanner_session)
 
 
 def prev_close_from_htf(htf: pd.DataFrame):
@@ -491,6 +517,7 @@ def mark(phase, bump=False):
 
 
 def scanner_loop():
+  print(f"[boot] pid {os.getpid()} scanner starting", flush=True)
     last_slow, htf, prev_close = 0.0, None, None
     while True:
         try:
@@ -595,10 +622,14 @@ def watchdog_loop():
         with LOCK:
             last = STATE["loop"].get("epoch")
             phase = STATE["loop"].get("phase")
-        if last and time.time() - last > WATCHDOG_SEC:
-            print(f"[watchdog] scanner stalled in phase '{phase}' for "
-                  f"{int(time.time() - last)}s (> {WATCHDOG_SEC}s) - exiting "
-                  f"so the platform restarts the service")
+    
+if not last:
+            continue
+        age = time.time() - last
+        if age > 90:
+            print(f"[watchdog] loop quiet for {int(age)}s in phase '{phase}'", flush=True)
+        if age > WATCHDOG_SEC:
+            print(f"[watchdog] stalled in '{phase}' {int(age)}s - exiting for restart", flush=True)
             os._exit(1)
 
 
@@ -620,6 +651,12 @@ start_scanner()
 # ----------------------------------------------------------------------
 # Routes
 # ----------------------------------------------------------------------
+@app.after_request
+def no_store(resp):
+    if request.path.startswith("/api/") or request.path == "/healthz":
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+  
 @app.route("/")
 def index():
     return render_template("index.html", symbol=SYMBOL)
