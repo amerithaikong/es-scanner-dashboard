@@ -428,8 +428,8 @@ _scanner_session.headers.update(YH_HEADERS)
 
 
 def get_with_deadline(session, url, deadline=25):
-    """GET that CANNOT hang: requests' timeout doesn't cover DNS resolution,
-    so run the request in a disposable thread and abandon it past deadline."""
+    """GET that cannot hang: requests' timeout doesn't cover DNS, so run
+    the request in a disposable thread and abandon it past the deadline."""
     result = {}
 
     def _run():
@@ -447,11 +447,11 @@ def get_with_deadline(session, url, deadline=25):
     if "e" in result:
         raise result["e"]
     return result["r"]
-  
-def yahoochart(interval: str, range: str, session=None) -> pd.DataFrame:
-  session = session or _yh_session
-    """Direct Yahoo v8 chart API via proxy/hosts. Every request has a hard
-    10s timeout, so a dead connection can never hang the scanner thread."""
+
+
+def yahoo_chart(interval, range_, session=None):
+    """Direct Yahoo v8 chart API via proxy/hosts, hard deadline per request."""
+    session = session or _yh_session
     last_err = None
     for attempt, base in enumerate(YH_BASES + YH_BASES[:1]):
         try:
@@ -478,8 +478,9 @@ def yahoochart(interval: str, range: str, session=None) -> pd.DataFrame:
             return df
         except Exception as e:
             last_err = e
-            time.sleep(1.5 * (attempt + 1))   # backoff before next host/retry
+            time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"yahoo chart api failed: {last_err}")
+
 
 
 def fetch(interval: str, period: str) -> pd.DataFrame:
