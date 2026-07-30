@@ -633,17 +633,16 @@ def watchdog_loop():
             print(f"[watchdog] stalled in '{phase}' {int(age)}s - exiting for restart", flush=True)
             os._exit(1)
 
-
-_started, _start_lock = False, threading.Lock()
+_scanner_pid, _start_lock = None, threading.Lock()
 
 
 def start_scanner():
-    global _started
+    global _scanner_pid
     with _start_lock:
-        if not _started:
+        if _scanner_pid != os.getpid():
             threading.Thread(target=scanner_loop, daemon=True).start()
             threading.Thread(target=watchdog_loop, daemon=True).start()
-            _started = True
+            _scanner_pid = os.getpid()
 
 
 start_scanner()
