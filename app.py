@@ -624,7 +624,7 @@ def watchdog_loop():
             last = STATE["loop"].get("epoch")
             phase = STATE["loop"].get("phase")
     
-if not last:
+        if not last:
             continue
         age = time.time() - last
         if age > 90:
