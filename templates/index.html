@@ -322,6 +322,7 @@ function setFeed(status, updatedIso, detail){
 
 async function refreshStatus(){
   try{
+     const r = await fetch('/api/status'); const d = await r.json();
      const hb = d.loop && d.loop.ts
       ? Math.round((Date.now() - DT.fromISO(d.loop.ts).toMillis()) / 1000) : null;
     const stalled = hb != null && hb > 120;
