@@ -322,8 +322,11 @@ function setFeed(status, updatedIso, detail){
 
 async function refreshStatus(){
   try{
-    const r = await fetch('/api/status'); const d = await r.json();
-    setFeed(d.feed.status, d.price_updated, d.feed.detail);
+     const hb = d.loop && d.loop.ts
+      ? Math.round((Date.now() - DT.fromISO(d.loop.ts).toMillis()) / 1000) : null;
+    const stalled = hb != null && hb > 120;
+    setFeed(stalled ? 'stale' : d.feed.status, d.price_updated,
+            stalled ? `scanner heartbeat ${hb}s ago` : d.feed.detail);
 
     // price + real-time change flash
     if(d.last_price != null){
