@@ -31,6 +31,19 @@ AVOID FILTERS (any one blocks the alert):
 
 CONFIDENCE = weighted bias + trigger points / available points. Alert fires
 only at >= CONF_MIN (default 75%), max 2/day, 120 min cooldown.
+
+v2.1 reliability changes:
+  - REMOVED the yfinance fallback. Direct Yahoo hosts are permanently 429'd
+    from this server's IP, so the fallback could never succeed - but
+    yf.download() has no request timeout, so a silently-dropped connection
+    hung the scanner thread forever (the 80,000s stall). All data now goes
+    through yahoo_chart(), where every request has a hard 10s timeout.
+  - prev_close no longer requires a separate daily fetch every loop. It is
+    refreshed on the slow cadence and, if that fails, derived from the 1h
+    dataframe already in memory (last close of the prior NY trading date).
+  - Watchdog thread: if the scanner loop's heartbeat is older than
+    WATCHDOG_SEC (default 300s), the process exits with code 1 so the
+    hosting platform (Render etc.) restarts it automatically.
 """
 
 import os
@@ -44,7 +57,6 @@ from email.mime.text import MIMEText
 import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
 from flask import Flask, jsonify, render_template, request
 
 # ----------------------------------------------------------------------
@@ -65,6 +77,7 @@ STOP_PTS, TARGET1_PTS = 10.0, 10.0
 MAX_ALERTS_PER_DAY, COOLDOWN_MIN = 2, 120
 POLL_FAST = int(os.environ.get("POLL_FAST", 30))
 POLL_SLOW = int(os.environ.get("POLL_SLOW", 180))
+WATCHDOG_SEC = int(os.environ.get("WATCHDOG_SEC", 300))   # restart if loop stalls
 CHART_BARS = 200
 
 # Weights (points). VWAP weights are excluded from the denominator outside RTH.
@@ -92,7 +105,7 @@ STATE = {
     "confidence": None,
     "alerts": [], "alerts_today": 0, "alerts_date": "", "last_alert_ts": 0.0,
     "feed": {"status": "starting", "detail": "", "errors": 0},
-    "loop": {"n": 0, "phase": "boot", "ts": None},
+    "loop": {"n": 0, "phase": "boot", "ts": None, "epoch": None},
 }
 
 
@@ -411,8 +424,8 @@ _yh_session.headers.update(YH_HEADERS)
 
 
 def yahoo_chart(interval: str, range_: str) -> pd.DataFrame:
-    """Direct Yahoo v8 chart API - far more reliable from datacenter IPs
-    than the yfinance session, and one lightweight request per call."""
+    """Direct Yahoo v8 chart API via proxy/hosts. Every request has a hard
+    10s timeout, so a dead connection can never hang the scanner thread."""
     last_err = None
     for attempt, base in enumerate(YH_BASES + YH_BASES[:1]):
         try:
@@ -444,20 +457,28 @@ def yahoo_chart(interval: str, range_: str) -> pd.DataFrame:
 
 
 def fetch(interval: str, period: str) -> pd.DataFrame:
+    # yfinance fallback removed: from this server's IP the direct Yahoo hosts
+    # are hard 429-blocked, so yf.download() could never succeed - and it has
+    # no request timeout, which is what silently froze the scanner thread.
+    return yahoo_chart(interval, period)
+
+
+def prev_close_from_htf(htf: pd.DataFrame):
+    """Fallback: derive previous session close from 1h bars already in memory
+    (last close of the most recent NY-date before today)."""
     try:
-        return yahoo_chart(interval, period)
-    except Exception as primary_err:
-        try:  # fallback: yfinance
-            df = yf.download(SYMBOL, interval=interval, period=period,
-                             progress=False, prepost=True, auto_adjust=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df = df.dropna(subset=["Close"])
-            if len(df) < 5:
-                raise RuntimeError(f"empty {interval} response")
-            return df
-        except Exception:
-            raise primary_err
+        idx = (htf.index.tz_convert("America/New_York") if htf.index.tz
+               else htf.index.tz_localize("UTC").tz_convert("America/New_York"))
+        today = datetime.now(timezone.utc).astimezone(idx.tz).date()
+        dates = np.array(idx.date)
+        mask = dates < today
+        if not mask.any():
+            return None
+        last_prior_date = dates[mask][-1]
+        closes = htf["Close"].to_numpy(dtype=float)
+        return float(closes[dates == last_prior_date][-1])
+    except Exception:
+        return None
 
 
 def mark(phase, bump=False):
@@ -466,10 +487,11 @@ def mark(phase, bump=False):
             STATE["loop"]["n"] += 1
         STATE["loop"]["phase"] = phase
         STATE["loop"]["ts"] = datetime.now(timezone.utc).isoformat()
+        STATE["loop"]["epoch"] = time.time()
 
 
 def scanner_loop():
-    last_slow, htf = 0.0, None
+    last_slow, htf, prev_close = 0.0, None, None
     while True:
         try:
             mark("fetch 5m", bump=True)
@@ -478,17 +500,24 @@ def scanner_loop():
             last_price = float(closes.iloc[-1])
             idx = ltf.index.tz_convert("UTC") if ltf.index.tz else ltf.index.tz_localize("UTC")
 
-            mark("fetch daily")
-            try:
-                daily = fetch("1d", "5d")
-                prev_close = float(daily["Close"].iloc[-2])
-            except Exception:
-                prev_close = STATE["prev_close"]
-
-            if htf is None or time.time() - last_slow >= POLL_SLOW:
+            slow_due = htf is None or time.time() - last_slow >= POLL_SLOW
+            if slow_due:
                 mark("fetch 1h")
                 htf = fetch("1h", "60d")
                 last_slow = time.time()
+
+                # prev_close: refresh on the slow cadence only. Daily fetch
+                # first; if it fails, derive from the 1h data we already have.
+                mark("prev close")
+                try:
+                    daily = fetch("1d", "5d")
+                    prev_close = float(daily["Close"].iloc[-2])
+                except Exception as e:
+                    print(f"[warn] daily fetch failed ({e}); deriving prev close from 1h")
+                    derived = prev_close_from_htf(htf)
+                    prev_close = derived if derived else STATE["prev_close"]
+            else:
+                prev_close = prev_close or STATE["prev_close"]
 
             mark("evaluate")
             bias = eval_bias(htf, ltf)
@@ -557,6 +586,22 @@ def scanner_loop():
         time.sleep(POLL_FAST)
 
 
+def watchdog_loop():
+    """Self-heal: if the scanner heartbeat is older than WATCHDOG_SEC, exit
+    the process so the hosting platform restarts it. This catches any future
+    hang (library bug, DNS stall, etc.) that a try/except cannot."""
+    while True:
+        time.sleep(30)
+        with LOCK:
+            last = STATE["loop"].get("epoch")
+            phase = STATE["loop"].get("phase")
+        if last and time.time() - last > WATCHDOG_SEC:
+            print(f"[watchdog] scanner stalled in phase '{phase}' for "
+                  f"{int(time.time() - last)}s (> {WATCHDOG_SEC}s) - exiting "
+                  f"so the platform restarts the service")
+            os._exit(1)
+
+
 _started, _start_lock = False, threading.Lock()
 
 
@@ -565,6 +610,7 @@ def start_scanner():
     with _start_lock:
         if not _started:
             threading.Thread(target=scanner_loop, daemon=True).start()
+            threading.Thread(target=watchdog_loop, daemon=True).start()
             _started = True
 
 
@@ -639,6 +685,10 @@ def api_debug():
 
 @app.route("/healthz")
 def healthz():
+    with LOCK:
+        last = STATE["loop"].get("epoch")
+    if last and time.time() - last > WATCHDOG_SEC:
+        return "stalled", 503
     return "ok"
 
 
