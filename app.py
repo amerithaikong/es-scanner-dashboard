@@ -53,6 +53,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -77,6 +78,9 @@ STOP_PTS, TARGET1_PTS = 10.0, 10.0
 MAX_ALERTS_PER_DAY, COOLDOWN_MIN = 2, 120
 POLL_FAST = int(os.environ.get("POLL_FAST", 30))
 POLL_SLOW = int(os.environ.get("POLL_SLOW", 180))
+# Alerts only fire inside this ET window (scanning never stops).
+ALERT_WINDOW_START = os.environ.get("ALERT_WINDOW_START", "05:00")  # ET, premarket open
+ALERT_WINDOW_END = os.environ.get("ALERT_WINDOW_END", "20:00")      # ET, RTH close
 WATCHDOG_SEC = int(os.environ.get("WATCHDOG_SEC", 300))   # restart if loop stalls
 CHART_BARS = 200
 
@@ -374,9 +378,17 @@ def format_alert(direction, conf, bias, trig, entry, stop, t1):
     lines += ["", f"Entry:\n{entry:.2f}", f"Stop:\n{stop:.2f}",
               f"Scale 1/2 at {t1:.2f}, stop->BE, trail runner on 5m swings"]
     return "\n".join(lines)
-
+  
+def in_alert_window():
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    if now_et.weekday() >= 5:          # no alerts Sat/Sun
+        return False
+    hhmm = now_et.strftime("%H:%M")
+    return ALERT_WINDOW_START <= hhmm < ALERT_WINDOW_END
 
 def maybe_alert(direction, conf, bias, trig):
+    if not in_alert_window():
+        return False
     now = time.time()
     today = datetime.now(timezone.utc).date().isoformat()
     with LOCK:
