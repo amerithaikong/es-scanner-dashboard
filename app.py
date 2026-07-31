@@ -473,8 +473,7 @@ def yahoo_chart(interval, range_, session=None):
     for attempt, base in enumerate(YH_BASES + YH_BASES[:1]):
         try:
             url = (f"{base}/v8/finance/chart/{requests.utils.quote(SYMBOL)}"
-                   f"?interval={interval}&range={range_}"
-                   f"&includePrePost=true&events=div%2Csplit")
+                   f"?interval={interval}&range={range_}")
             r = get_with_deadline( url)
             if r.status_code == 429:
                 raise RuntimeError("HTTP 429 rate limited")
@@ -493,8 +492,10 @@ def yahoo_chart(interval, range_, session=None):
                 raise RuntimeError(f"empty {interval} response")
             df["Volume"] = df["Volume"].fillna(0)
             return df
-        except Exception as e:
+         except Exception as e:
             last_err = e
+            print(f"[warn] fetch attempt {attempt+1} {base}: "
+                  f"{type(e).__name__}: {str(e)[:100]}", flush=True)
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"yahoo chart api failed: {last_err}")
 
@@ -721,7 +722,7 @@ def api_debug():
     for base in YH_BASES:
         try:
             url = (f"{base}/v8/finance/chart/"
-                   f"{requests.utils.quote(SYMBOL)}?interval=5m&range=1d")
+                   f"{requests.utils.quote(SYMBOL)}?interval=5m&range=2d")
             r = _yh_session.get(url, timeout=10)
             body = r.text[:120].replace("\n", " ")
             n = 0
