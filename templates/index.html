@@ -199,7 +199,7 @@ a{color:inherit}
 <script>
 const $ = id => document.getElementById(id);
 const DT = luxon.DateTime;
-let chart, lastPrice = null;
+let chart, lastPrice = null, hoverIdx = null;
 
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const leadDot = {
@@ -207,9 +207,10 @@ const leadDot = {
   afterDatasetsDraw(c){
     const meta = c.getDatasetMeta(0);
     if(!meta.data.length) return;
-    const pt = meta.data[meta.data.length-1];
+    const idx = hoverIdx != null ? hoverIdx : meta.data.length - 1;
+    const pt = meta.data[idx];
     const d0 = c.data.datasets[0].data;
-    const up = d0.length > 1 ? d0[d0.length-1].y >= d0[d0.length-2].y : true;
+    const up = idx > 0 ? d0[idx].y >= d0[idx-1].y : true;
     const col = up ? css('--long') : css('--short');
     const ctx = c.ctx, t = (Date.now() % 1600) / 1600;
     ctx.save();
@@ -239,7 +240,9 @@ function buildChart(){
     type:'line',
     data:{datasets:[
       {label:'ES 5m close', data:[], parsing:false, borderColor:css('--text'),
-       borderWidth:1.6, pointRadius:0, pointHitRadius:6, tension:0, order:1},
+       borderWidth:1.6, pointRadius:0, pointHitRadius:6, tension:0, order:1,
+       segment:{borderColor: c => (hoverIdx != null && c.p0DataIndex >= hoverIdx)
+                ? '#3A4258' : undefined}},
       {label:'LR mid', data:[], parsing:false, borderColor:css('--amber'),
        borderWidth:1.4, pointRadius:0, borderDash:[], order:2},
       {label:'+1σ', data:[], parsing:false, borderColor:css('--amber')+'88',
@@ -257,6 +260,18 @@ function buildChart(){
     ]},
     options:{
       responsive:true, maintainAspectRatio:false, animation:false,
+      onHover(e, actives, c){
+        const pts = c.data.datasets[0].data;
+        if(!pts.length || e.x == null) return;
+        const xv = c.scales.x.getValueForPixel(e.x);
+        let best = 0, bd = Infinity;
+        for(let i = 0; i < pts.length; i++){
+          const d = Math.abs(pts[i].x - xv);
+          if(d < bd){ bd = d; best = i; }
+        }
+        hoverIdx = best;
+        $('lastPx').textContent = pts[best].y.toFixed(2);
+      },
       interaction:{mode:'nearest', intersect:false},
       plugins:{
         legend:{display:false},
@@ -360,7 +375,7 @@ async function refreshStatus(){
         el.classList.add(d.last_price > lastPrice ? 'up' : 'down');
         setTimeout(()=>el.classList.remove('up','down'), 700);
       }
-      el.textContent = d.last_price.toFixed(2);
+      if(hoverIdx == null) el.textContent = d.last_price.toFixed(2);
       lastPrice = d.last_price;
     }
     if(d.change_pts != null){
@@ -433,6 +448,10 @@ async function refreshStatus(){
 }
 
 buildChart();
+$('chart').addEventListener('mouseleave', () => {
+  hoverIdx = null;
+  $('lastPx').textContent = lastPrice != null ? lastPrice.toFixed(2) : '——.—';
+});
 $('tfSel').addEventListener('change', e => { chartTF = e.target.value; refreshChart(); });
 refreshStatus(); refreshChart();
 setInterval(refreshStatus, 10000);   // price/status every 10s
