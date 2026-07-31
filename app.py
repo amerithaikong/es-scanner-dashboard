@@ -58,6 +58,11 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import requests
+# Render containers sometimes have broken IPv6 routing: DNS returns an
+# IPv6 address, connects to it hang. Force urllib3 to use IPv4 only.
+import socket
+import urllib3.util.connection as _urllib3_cn
+_urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
 from flask import Flask, jsonify, render_template, request
 
 # ----------------------------------------------------------------------
@@ -449,6 +454,12 @@ def get_with_deadline(url, deadline=25):
         s = requests.Session()
         s.headers.update(YH_HEADERS)
         try:
+            result["stage"] = "dns"
+            host = url.split("/")[2]
+            t0 = time.time()
+            socket.getaddrinfo(host, 443, socket.AF_INET)
+            result["dns_s"] = round(time.time() - t0, 1)
+            result["stage"] = "http"
             result["r"] = s.get(url, timeout=10)
         except Exception as e:
             result["e"] = e
@@ -460,7 +471,8 @@ def get_with_deadline(url, deadline=25):
     t.join(deadline)
     if t.is_alive():
         raise RuntimeError(f"request exceeded {deadline}s hard deadline "
-                           f"(DNS or socket stall)")
+                           f"(stalled at stage: {result.get('stage')}, "
+                           f"dns took {result.get('dns_s', '?')}s)")
     if "e" in result:
         raise result["e"]
     return result["r"]
