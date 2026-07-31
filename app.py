@@ -439,16 +439,21 @@ _scanner_session = requests.Session()
 _scanner_session.headers.update(YH_HEADERS)
 
 
-def get_with_deadline(session, url, deadline=25):
-    """GET that cannot hang: requests' timeout doesn't cover DNS, so run
-    the request in a disposable thread and abandon it past the deadline."""
+def get_with_deadline(url, deadline=25):
+    """GET that cannot hang. Runs in a disposable thread with its OWN
+    fresh session, so an abandoned (timed-out) thread can never poison
+    state shared with future requests."""
     result = {}
 
     def _run():
+        s = requests.Session()
+        s.headers.update(YH_HEADERS)
         try:
-            result["r"] = session.get(url, timeout=10)
+            result["r"] = s.get(url, timeout=10)
         except Exception as e:
             result["e"] = e
+        finally:
+            s.close()
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -470,7 +475,7 @@ def yahoo_chart(interval, range_, session=None):
             url = (f"{base}/v8/finance/chart/{requests.utils.quote(SYMBOL)}"
                    f"?interval={interval}&range={range_}"
                    f"&includePrePost=true&events=div%2Csplit")
-            r = get_with_deadline(session, url)
+            r = get_with_deadline( url)
             if r.status_code == 429:
                 raise RuntimeError("HTTP 429 rate limited")
             r.raise_for_status()
