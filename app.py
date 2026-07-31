@@ -493,10 +493,10 @@ def yahoo_chart(interval, range_, session=None):
             df["Volume"] = df["Volume"].fillna(0)
             return df
          except Exception as e:
-            last_err = e
-            print(f"[warn] fetch attempt {attempt+1} {base}: "
-                  f"{type(e).__name__}: {str(e)[:100]}", flush=True)
-            time.sleep(1.5 * (attempt + 1))
+                  last_err = e
+                  print(f"[warn] fetch attempt {attempt+1} {base}: "
+                        f"{type(e).__name__}: {str(e)[:100]}", flush=True)
+                  time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"yahoo chart api failed: {last_err}")
 
 
