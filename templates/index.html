@@ -202,6 +202,28 @@ const DT = luxon.DateTime;
 let chart, lastPrice = null;
 
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const leadDot = {
+  id: 'leadDot',
+  afterDatasetsDraw(c){
+    const meta = c.getDatasetMeta(0);
+    if(!meta.data.length) return;
+    const pt = meta.data[meta.data.length-1];
+    const d0 = c.data.datasets[0].data;
+    const up = d0.length > 1 ? d0[d0.length-1].y >= d0[d0.length-2].y : true;
+    const col = up ? css('--long') : css('--short');
+    const ctx = c.ctx, t = (Date.now() % 1600) / 1600;
+    ctx.save();
+    ctx.beginPath();                     // expanding pulse ring
+    ctx.arc(pt.x, pt.y, 4 + t*14, 0, Math.PI*2);
+    ctx.strokeStyle = col + Math.round((1-t)*128).toString(16).padStart(2,'0');
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.shadowColor = col; ctx.shadowBlur = 12;   // glowing core
+    ctx.beginPath(); ctx.arc(pt.x, pt.y, 4.5, 0, Math.PI*2);
+    ctx.fillStyle = col; ctx.fill();
+    ctx.restore();
+  }
+};  
 
 function fmt(n, d=2){ return n==null ? '—' : Number(n).toFixed(d); }
 function fRow(f){
@@ -265,7 +287,8 @@ function buildChart(){
            title:{display:true, text:'ES price (pts)', color:css('--dim'),
                   font:{family:'Archivo', size:10}}}
       }
-    }
+    },
+    plugins:[leadDot]
   });
 }
 
@@ -414,6 +437,7 @@ $('tfSel').addEventListener('change', e => { chartTF = e.target.value; refreshCh
 refreshStatus(); refreshChart();
 setInterval(refreshStatus, 10000);   // price/status every 10s
 setInterval(refreshChart, 30000);    // chart + channel every 30s
+(function pulse(){ if(chart) chart.draw(); requestAnimationFrame(pulse); })();
 </script>
 </body>
 </html>
