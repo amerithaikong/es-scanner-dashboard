@@ -301,7 +301,7 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
     a5 = atr(closed, 14)
         a5 = float(a5) if np.isfinite(a5) and a5 > 0 else 0.0
         swing = (float(closed["Low"].tail(SWING_LOOKBACK).min()) if long_
-                else float(closed["High"].tail(SWING_LOOKBACK).max()))
+                 else float(closed["High"].tail(SWING_LOOKBACK).max()))
         ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
         bar_mid = float((closed["High"].iloc[-1] + closed["Low"].iloc[-1]) / 2)
         limit = max(bar_mid, ema20) if long_ else min(bar_mid, ema20)
