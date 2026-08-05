@@ -79,8 +79,20 @@ PULLBACK_Z = 0.25          # long: armed when z <= +0.25 (at/through midline)
 INVALID_Z = 2.75           # pullback deeper than this against trend = broken
 CHASE_Z = 0.35             # no entry if price already beyond mid +0.35s in trend dir
 RSI_LEN, EMA_FAST, EMA_SLOW = 14, 50, 200
-STOP_PTS, TARGET1_PTS = 10.0, 10.0
-MAX_ALERTS_PER_DAY, COOLDOWN_MIN = 2, 120
+STOP_PTS, TARGET1_PTS = 10.0, 10.0          # fallbacks only
+STOP_ATR_MULT = float(os.environ.get("STOP_ATR_MULT", 1.5))
+MIN_STOP_PTS  = float(os.environ.get("MIN_STOP_PTS", 8.0))
+MAX_STOP_PTS  = float(os.environ.get("MAX_STOP_PTS", 20.0))
+TARGET_R      = float(os.environ.get("TARGET_R", 0.75))
+SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", 12))   # 5m bars for swing stop
+
+MAX_BAR_ATR = float(os.environ.get("MAX_BAR_ATR", 1.3))   # trigger bar width cap
+MAX_EXT_EMA = float(os.environ.get("MAX_EXT_EMA", 1.2))   # ATRs above 5m 20EMA
+
+MAX_ALERTS_PER_DAY = int(os.environ.get("MAX_ALERTS_PER_DAY", 0))   # 0 = unlimited
+COOLDOWN_MIN = int(os.environ.get("COOLDOWN_MIN", 45))
+CONF_MIN_OVERNIGHT = float(os.environ.get("CONF_MIN_OVERNIGHT", 90))
+
 POLL_FAST = int(os.environ.get("POLL_FAST", 30))
 POLL_SLOW = int(os.environ.get("POLL_SLOW", 180))
 # Alerts only fire inside this ET window (scanning never stops).
@@ -286,6 +298,16 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
     long_ = direction == "LONG"
 
     c = float(close.iloc[-1])
+    a5 = atr(closed, 14)
+        a5 = float(a5) if np.isfinite(a5) and a5 > 0 else 0.0
+        swing = (float(closed["Low"].tail(SWING_LOOKBACK).min()) if long_
+                else float(closed["High"].tail(SWING_LOOKBACK).max()))
+        ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+        bar_mid = float((closed["High"].iloc[-1] + closed["Low"].iloc[-1]) / 2)
+        limit = max(bar_mid, ema20) if long_ else min(bar_mid, ema20)
+        limit = min(limit, c) if long_ else max(limit, c)
+   
+  
     prev_h, prev_l = float(closed["High"].iloc[-2]), float(closed["Low"].iloc[-2])
     momentum = c > prev_h if long_ else c < prev_l
 
@@ -327,9 +349,10 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
         avail += W_TRIG[kname]
         if f["ok"]:
             pts += W_TRIG[kname]
-    return {"factors": factors, "pts": pts, "avail": avail,
-            "mandatory_ok": momentum, "entry": c}
-
+        return {"factors": factors, "pts": pts, "avail": avail,
+            "mandatory_ok": momentum, "entry": c,
+            "atr5": round(a5, 2), "swing": round(swing, 2),
+            "ema20": round(ema20, 2), "limit": round(limit * 4) / 4}
 
 def eval_avoid(htf: pd.DataFrame, ltf: pd.DataFrame, bias: dict):
     reasons = []
@@ -355,6 +378,20 @@ def eval_avoid(htf: pd.DataFrame, ltf: pd.DataFrame, bias: dict):
     vavg = float(vol.rolling(20).mean().iloc[-1])
     if np.isfinite(vavg) and vavg > 0 and float(vol.iloc[-1]) < 0.35 * vavg:
         reasons.append("Extremely low volume period")
+    l5 = ltf.iloc[:-1]
+    a5 = atr(l5, 14)
+    if np.isfinite(a5) and a5 > 0 and bias["direction"]:
+        bar_rng = float(l5["High"].iloc[-1] - l5["Low"].iloc[-1])
+        if bar_rng > MAX_BAR_ATR * a5:
+            reasons.append(f"Trigger bar too wide: {bar_rng:.1f} pts "
+                           f"> {MAX_BAR_ATR}x 5m ATR ({a5:.1f})")
+        e20 = float(l5["Close"].ewm(span=20, adjust=False).mean().iloc[-1])
+        ext = (float(l5["Close"].iloc[-1]) - e20) / a5
+        if bias["direction"] == "LONG" and ext > MAX_EXT_EMA:
+            reasons.append(f"Extended {ext:.1f} ATR above 5m 20EMA - wait for pullback")
+        if bias["direction"] == "SHORT" and ext < -MAX_EXT_EMA:
+            reasons.append(f"Extended {abs(ext):.1f} ATR below 5m 20EMA - wait for pullback")
+
     return reasons
 
 
@@ -380,7 +417,8 @@ def format_alert(direction, conf, bias, trig, entry, stop, t1):
     for f in bias["factors"] + trig["factors"]:
         mark = "\u2013" if f["na"] else ("\u2713" if f["ok"] else "\u2717")
         lines.append(f"{mark} {f['name']}")
-    lines += ["", f"Entry:\n{entry:.2f}", f"Stop:\n{stop:.2f}",
+    lines += ["", f"Limit: {trig.get('limit', entry):.2f}  (mkt {entry:.2f})",
+              f"Stop: {stop:.2f}  ({abs(entry - stop):.2f} pts)",
               f"Scale 1/2 at {t1:.2f}, stop->BE, trail runner on 5m swings"]
     return "\n".join(lines)
   
@@ -399,14 +437,23 @@ def maybe_alert(direction, conf, bias, trig):
     with LOCK:
         if STATE["alerts_date"] != today:
             STATE["alerts_date"], STATE["alerts_today"] = today, 0
-        if STATE["alerts_today"] >= MAX_ALERTS_PER_DAY:
+        if MAX_ALERTS_PER_DAY and STATE["alerts_today"] >= MAX_ALERTS_PER_DAY:
             return False
         if now - STATE["last_alert_ts"] < COOLDOWN_MIN * 60:
             return False
         entry = trig["entry"]
-        stop = entry - STOP_PTS if direction == "LONG" else entry + STOP_PTS
-        t1 = entry + TARGET1_PTS if direction == "LONG" else entry - TARGET1_PTS
-        alert = {"ts": datetime.now(timezone.utc).isoformat(), "direction": direction,
+        a5 = trig.get("atr5") or 0.0
+        vol_risk = STOP_ATR_MULT * a5 if a5 > 0 else STOP_PTS
+        struct_risk = (entry - trig["swing"] + 0.75) if direction == "LONG" \
+                      else (trig["swing"] - entry + 0.75)
+        risk = max(vol_risk, struct_risk)
+        risk = round(min(max(risk, MIN_STOP_PTS), MAX_STOP_PTS) * 4) / 4
+        t1_pts = round(min(TARGET_R * risk, TARGET1_PTS) * 4) / 4
+        stop = entry - risk if direction == "LONG" else entry + risk
+        t1 = entry + t1_pts if direction == "LONG" else entry - t1_pts
+
+        alert = {"ts": datetime.now(timezone.utc).isoformat(), "limit": trig.get("limit"), 
+                 "risk": risk, "direction": direction,
                  "confidence": round(conf), "entry": round(entry, 2),
                  "stop": round(stop, 2), "t1": round(t1, 2),
                  "factors": [{"name": f["name"], "ok": f["ok"], "na": f["na"]}
@@ -604,7 +651,9 @@ def scanner_loop():
                 trig = eval_trigger(ltf, setup["direction"], bias)
                 denom = bias["avail"] + trig["avail"]
                 conf = 100 * (bias["pts"] + trig["pts"]) / denom if denom else 0.0
-                if trig["mandatory_ok"] and not avoid and conf >= CONF_MIN:
+                conf_needed = CONF_MIN if bias.get("in_rth") else CONF_MIN_OVERNIGHT
+                if trig["mandatory_ok"] and not avoid and conf >= conf_needed:
+
                     if maybe_alert(setup["direction"], conf, bias, trig):
                         setup = None  # consumed
 
@@ -705,7 +754,7 @@ def api_status():
                       if setup else None),
             "trigger": STATE["trigger"], "confidence": STATE["confidence"],
             "alerts": STATE["alerts"], "alerts_today": STATE["alerts_today"],
-            "max_alerts": MAX_ALERTS_PER_DAY,
+            "max_alerts": MAX_ALERTS_PER_DAY or None,
             "cooldown_remaining": max(0, int(COOLDOWN_MIN * 60 -
                                              (time.time() - STATE["last_alert_ts"])))
             if STATE["last_alert_ts"] else 0,
