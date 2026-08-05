@@ -430,7 +430,7 @@ async function refreshStatus(){
     $('avoidList').innerHTML = (d.avoid||[]).map(a=>`<span class="avoid-chip">⛔ ${a}</span>`).join('');
 
     // alerts
-    $('alertCount').textContent = `${d.alerts_today} / ${d.max_alerts} today` +
+    $('alertCount').textContent = `${d.alerts_today}${d.max_alerts ? " / " + d.max_alerts: ""} today` +
       (d.cooldown_remaining>0 ? ` · cooldown ${Math.ceil(d.cooldown_remaining/60)}m` : '');
     if(d.alerts.length){
       $('alerts').innerHTML = d.alerts.map(a=>`
