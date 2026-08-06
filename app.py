@@ -98,7 +98,7 @@ CONF_MIN_OVERNIGHT = float(os.environ.get("CONF_MIN_OVERNIGHT", 90))
 POLL_FAST = int(os.environ.get("POLL_FAST", 30))
 POLL_SLOW = int(os.environ.get("POLL_SLOW", 180))
 # Alerts only fire inside this ET window (scanning never stops).
-ALERT_WINDOW_START = os.environ.get("ALERT_WINDOW_START", "05:00")  # ET, premarket open
+ALERT_WINDOW_START = os.environ.get("ALERT_WINDOW_START", "06:00")  # ET, premarket open
 ALERT_WINDOW_END = os.environ.get("ALERT_WINDOW_END", "20:00")      # ET, RTH close
 WATCHDOG_SEC = int(os.environ.get("WATCHDOG_SEC", 300))   # restart if loop stalls
 CHART_BARS = 200
