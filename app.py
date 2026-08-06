@@ -674,13 +674,13 @@ def scanner_loop():
                 STATE["last_price"] = round(last_price, 2)
                 STATE["price_updated"] = datetime.now(timezone.utc).isoformat()
                 p = STATE["alerts"][0] if STATE["alerts"] else None
-                            if p and not STATE["last_resolved"]:
-                                if p["direction"] == "LONG":
-                                    done = last_price >= p["t1"] or last_price <= p["stop"]
-                                else:
-                                    done = last_price <= p["t1"] or last_price >= p["stop"]
-                                if done:
-                                    STATE["last_resolved"] = True
+                if p and not STATE["last_resolved"]:
+                    if p["direction"] == "LONG":
+                        done = last_price >= p["t1"] or last_price <= p["stop"]
+                    else:
+                        done = last_price <= p["t1"] or last_price >= p["stop"]
+                    if done:
+                        STATE["last_resolved"] = True
                   
                 if prev_close:
                     STATE["prev_close"] = round(prev_close, 2)
