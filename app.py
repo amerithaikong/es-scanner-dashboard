@@ -72,6 +72,7 @@ SYMBOL = "ES=F"
 LOOKBACKS = (40, 20)                                      # dual regression windows
 MIN_R2 = float(os.environ.get("MIN_R2", 0.45))
 MIN_SLOPE = float(os.environ.get("MIN_SLOPE", 0.30))      # pts per 1h bar
+MIN_ATR_TRADE = float(os.environ.get("MIN_ATR_TRADE", 2.5))
 BIAS_MIN_PCT = float(os.environ.get("BIAS_MIN_PCT", 60))  # % of bias weight to arm
 CONF_MIN = float(os.environ.get("CONF_MIN", 75))          # % to fire an alert
 ARM_HOURS = float(os.environ.get("ARM_HOURS", 8))         # armed setup lifetime
@@ -91,6 +92,7 @@ MAX_EXT_EMA = float(os.environ.get("MAX_EXT_EMA", 1.2))   # ATRs above 5m 20EMA
 
 MAX_ALERTS_PER_DAY = int(os.environ.get("MAX_ALERTS_PER_DAY", 0))   # 0 = unlimited
 COOLDOWN_MIN = int(os.environ.get("COOLDOWN_MIN", 45))
+DUPE_PTS = float(os.environ.get("DUPE_PTS", 12.0))
 CONF_MIN_OVERNIGHT = float(os.environ.get("CONF_MIN_OVERNIGHT", 90))
 
 POLL_FAST = int(os.environ.get("POLL_FAST", 30))
@@ -125,6 +127,7 @@ STATE = {
     "avoid": [],             # active avoid-filter reasons
     "confidence": None,
     "alerts": [], "alerts_today": 0, "alerts_date": "", "last_alert_ts": 0.0,
+        "last_resolved": True,
     "feed": {"status": "starting", "detail": "", "errors": 0},
     "loop": {"n": 0, "phase": "boot", "ts": None, "epoch": None},
 }
@@ -198,22 +201,23 @@ def swing_structure(htf: pd.DataFrame, k: int = 2, scan: int = 60):
 
 
 def session_vwap(ltf: pd.DataFrame):
-    """RTH VWAP anchored at 09:30 ET. Returns (vwap, applicable, in_rth)."""
+    """RTH VWAP anchored 09:30 ET; Globex VWAP anchored 18:00 ET otherwise."""
     idx = ltf.index.tz_convert("America/New_York")
     now = datetime.now(timezone.utc).astimezone(idx.tz)
     in_rth = (now.weekday() < 5 and
               (now.hour, now.minute) >= (9, 30) and now.hour < 16)
-    if not in_rth:
-        return None, False, False
-    day = now.date()
-    mask = (idx.date == day) & (idx.time >= pd.Timestamp("09:30").time())
-    sess = ltf.loc[mask]
+    if in_rth:
+        anchor = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    else:
+        anchor = now.replace(hour=18, minute=0, second=0, microsecond=0)
+        if now.hour < 18:
+            anchor -= pd.Timedelta(days=1)
+    sess = ltf.loc[idx >= anchor]
     if len(sess) < 3 or float(sess["Volume"].sum()) <= 0:
-        return None, False, True
+        return None, False, in_rth
     tp = (sess["High"] + sess["Low"] + sess["Close"]) / 3
     vwap = float((tp * sess["Volume"]).sum() / sess["Volume"].sum())
-    return vwap, True, True
-
+    return vwap, True, in_rth
 
 # ----------------------------------------------------------------------
 # Bias / trigger / avoid evaluation
@@ -381,6 +385,9 @@ def eval_avoid(htf: pd.DataFrame, ltf: pd.DataFrame, bias: dict):
     l5 = ltf.iloc[:-1]
     a5 = atr(l5, 14)
     if np.isfinite(a5) and a5 > 0 and bias["direction"]:
+        if a5 < MIN_ATR_TRADE:
+            reasons.append(f"Tape too quiet: 5m ATR {a5:.1f} "
+                           f"< {MIN_ATR_TRADE} - target unreachable")
         bar_rng = float(l5["High"].iloc[-1] - l5["Low"].iloc[-1])
         if bar_rng > MAX_BAR_ATR * a5:
             reasons.append(f"Trigger bar too wide: {bar_rng:.1f} pts "
@@ -441,6 +448,11 @@ def maybe_alert(direction, conf, bias, trig):
             return False
         if now - STATE["last_alert_ts"] < COOLDOWN_MIN * 60:
             return False
+        prev = STATE["alerts"][0] if STATE["alerts"] else None
+        if (prev and prev["direction"] == direction
+                and not STATE["last_resolved"]
+                and abs(trig["entry"] - prev["entry"]) < DUPE_PTS):
+            return False
         entry = trig["entry"]
         a5 = trig.get("atr5") or 0.0
         vol_risk = STOP_ATR_MULT * a5 if a5 > 0 else STOP_PTS
@@ -462,6 +474,7 @@ def maybe_alert(direction, conf, bias, trig):
         STATE["alerts"] = STATE["alerts"][:20]
         STATE["alerts_today"] += 1
         STATE["last_alert_ts"] = now
+        STATE["last_resolved"] = False
     body = format_alert(direction, conf, bias, trig, entry, stop, t1)
     print("ALERT\n" + body)
     send_sms(body)
@@ -660,6 +673,15 @@ def scanner_loop():
             with LOCK:
                 STATE["last_price"] = round(last_price, 2)
                 STATE["price_updated"] = datetime.now(timezone.utc).isoformat()
+                p = STATE["alerts"][0] if STATE["alerts"] else None
+                if p and not STATE["last_resolved"]:
+                if p["direction"] == "LONG":
+                    done = last_price >= p["t1"] or last_price <= p["stop"]
+                else:
+                    done = last_price <= p["t1"] or last_price >= p["stop"]
+                if done:
+                    STATE["last_resolved"] = True
+                  
                 if prev_close:
                     STATE["prev_close"] = round(prev_close, 2)
                     STATE["change_pts"] = round(last_price - prev_close, 2)
