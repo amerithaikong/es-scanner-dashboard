@@ -411,7 +411,11 @@ async function refreshStatus(){
     }
 
     // confidence + trigger factors + avoid
-    $('confTag').textContent = `fires at ≥ ${d.params.conf_min}%`;
+    const cmin = d.bias && d.bias.in_rth ? d.params.conf_min
+               : (d.params.conf_min_overnight ?? d.params.conf_min);
+    $('confTag').textContent = `fires at ≥ ${cmin}%`;
+    $('confMin').style.left = cmin + '%';
+
     const fill = $('confFill');
     $('confMin').style.left = d.params.conf_min + '%';
     if(d.confidence != null){
