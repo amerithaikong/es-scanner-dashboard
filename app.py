@@ -325,8 +325,9 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
 
     vol = closed["Volume"]
     vavg = float(vol.rolling(20).mean().iloc[-1])
-    vol_na = not np.isfinite(vavg) or vavg <= 0
-    vol_ok = (not vol_na) and float(vol.iloc[-1]) >= 1.1 * vavg
+    vlast = float(vol.iloc[-1])
+    vol_na = (not np.isfinite(vavg)) or vavg <= 0 or vlast <= 0
+    vol_ok = (not vol_na) and vlast >= 1.1 * vavg
 
     vwap = bias.get("vwap")
     if vwap:
@@ -358,7 +359,7 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
             "atr5": round(a5, 2), "swing": round(swing, 2),
             "ema20": round(ema20, 2), "limit": round(limit * 4) / 4}
 
-def eval_avoid(htf: pd.DataFrame, ltf: pd.DataFrame, bias: dict):
+def eval_avoid(htf: pd.DataFrame, ltf: pd.DataFrame, bias: dict, armed: bool = False):
     reasons = []
     if bias["direction"] is None:
         reasons.append("Ranging market - regression slope too flat")
@@ -372,7 +373,7 @@ def eval_avoid(htf: pd.DataFrame, ltf: pd.DataFrame, bias: dict):
         if travel > 3 * a:
             reasons.append(f"Extended move: {travel:.0f} pts in 6h > 3x ATR ({a:.0f})")
 
-    if bias["direction"]:
+    if bias["direction"] and not armed:
         z = bias["z"]
         chasing = z > CHASE_Z if bias["direction"] == "LONG" else z < -CHASE_Z
         if chasing:
@@ -380,7 +381,8 @@ def eval_avoid(htf: pd.DataFrame, ltf: pd.DataFrame, bias: dict):
 
     vol = ltf.iloc[:-1]["Volume"]
     vavg = float(vol.rolling(20).mean().iloc[-1])
-    if np.isfinite(vavg) and vavg > 0 and float(vol.iloc[-1]) < 0.35 * vavg:
+    vlast = float(vol.iloc[-1])
+    if np.isfinite(vavg) and vavg > 0 and 0 < vlast < 0.35 * vavg:
         reasons.append("Extremely low volume period")
     l5 = ltf.iloc[:-1]
     a5 = atr(l5, 14)
@@ -639,7 +641,7 @@ def scanner_loop():
 
             mark("evaluate")
             bias = eval_bias(htf, ltf)
-            avoid = eval_avoid(htf, ltf, bias)
+            avoid = eval_avoid(htf, ltf, bias, armed=bool(STATE["setup"]))
 
             # ---- stateful pullback arming ----
             now = time.time()
