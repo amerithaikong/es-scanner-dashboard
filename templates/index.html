@@ -417,7 +417,6 @@ async function refreshStatus(){
     $('confMin').style.left = cmin + '%';
 
     const fill = $('confFill');
-    $('confMin').style.left = d.params.conf_min + '%';
     if(d.confidence != null){
       fill.style.width = Math.min(100, d.confidence) + '%';
       fill.className = 'conffill' + (d.confidence >= d.params.conf_min ? ' hot' : '');
