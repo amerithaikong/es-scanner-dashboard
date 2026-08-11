@@ -490,7 +490,7 @@ YH_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
 # Optional relay (e.g. Cloudflare Worker) that forwards /v8/finance/chart/* to
 # Yahoo from a non-blocked IP. Set YH_PROXY in Render's Environment tab.
 YH_PROXY = os.environ.get("YH_PROXY", "").rstrip("/")
-YH_BASES = ([YH_PROXY, YH_PROXY] if YH_PROXY else []) + [f"https://{h}" for h in YH_HOSTS]
+YH_BASES = ([YH_PROXY] if YH_PROXY else []) + [f"https://{h}" for h in YH_HOSTS]
 YH_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -570,7 +570,7 @@ def yahoo_chart(interval, range_, session=None):
             last_err = e
             print(f"[warn] fetch attempt {attempt+1} {base}: "
                   f"{type(e).__name__}: {str(e)[:100]}", flush=True)
-            time.sleep(1.5 * (attempt + 1))
+            time.sleep(min(3.0, 1.5 * (attempt + 1)))
     raise RuntimeError(f"yahoo chart api failed: {last_err}")
 
 
