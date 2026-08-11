@@ -199,7 +199,7 @@ a{color:inherit}
 <script>
 const $ = id => document.getElementById(id);
 const DT = luxon.DateTime;
-let chart, lastPrice = null, hoverIdx = null;
+let chart, lastPrice = null, hoverIdx = null, hoverPx = null;
 
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const leadDot = {
@@ -213,6 +213,7 @@ const leadDot = {
     const up = idx > 0 ? d0[idx].y >= d0[idx-1].y : true;
     const col = up ? css('--long') : css('--short');
     const ctx = c.ctx, t = (Date.now() % 1600) / 1600;
+    const lineX = hoverIdx != null && hoverPx != null ? hoverPx : pt.x;
     ctx.save();
     ctx.beginPath();                     // expanding pulse ring
     ctx.arc(pt.x, pt.y, 4 + t*14, 0, Math.PI*2);
@@ -270,12 +271,14 @@ function buildChart(){
           if(d < bd){ bd = d; best = i; }
         }
         hoverIdx = best;
+        hoverPx = e.x;
         $('lastPx').textContent = pts[best].y.toFixed(2);
       },
       interaction:{mode:'nearest', intersect:false},
       plugins:{
         legend:{display:false},
         tooltip:{
+          animation:false,
           backgroundColor:'#121722', borderColor:css('--line'), borderWidth:1,
           titleFont:{family:'JetBrains Mono', size:11},
           bodyFont:{family:'JetBrains Mono', size:12},
