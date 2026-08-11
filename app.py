@@ -786,6 +786,8 @@ def api_status():
             "params": {"min_r2": MIN_R2, "min_slope": MIN_SLOPE,
                        "bias_min_pct": BIAS_MIN_PCT, "conf_min": CONF_MIN,
                        "stop_pts": STOP_PTS, "target1_pts": TARGET1_PTS},
+                       "conf_min_overnight": CONF_MIN_OVERNIGHT,
+
         })
 
 
