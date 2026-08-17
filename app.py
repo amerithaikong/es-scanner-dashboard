@@ -672,7 +672,7 @@ def scanner_loop():
                        STATE["ext_z"] = max(STATE["ext_z"], z)
                        pulled = z <= PULLBACK_Z or (STATE["ext_z"] - z) >= RETRACE_Z
                        broken = z < -INVALID_Z
-                    else:
+                else:
                        STATE["ext_z"] = min(STATE["ext_z"], z)
                        pulled = z >= -PULLBACK_Z or (z - STATE["ext_z"]) >= RETRACE_Z
                        broken = z > INVALID_Z
