@@ -665,21 +665,23 @@ def scanner_loop():
                           setup["direction"] != bias["direction"]):
                 setup = None
             if bias["quality_ok"] and bias["direction"]:
-               z = bias["z"]
-               if STATE["ext_dir"] != bias["direction"] or STATE["ext_z"] is None:
-                       STATE["ext_z"], STATE["ext_dir"] = z, bias["direction"]
-               if bias["direction"] == "LONG":
-                       STATE["ext_z"] = max(STATE["ext_z"], z)
-                       pulled = z <= PULLBACK_Z or (STATE["ext_z"] - z) >= RETRACE_Z
-                       broken = z < -INVALID_Z
+                z = bias["z"]
+                if STATE["ext_dir"] != bias["direction"] or STATE["ext_z"] is None:
+                    STATE["ext_z"], STATE["ext_dir"] = z, bias["direction"]
+                if bias["direction"] == "LONG":
+                    STATE["ext_z"] = max(STATE["ext_z"], z)
+                    pulled = z <= PULLBACK_Z or (STATE["ext_z"] - z) >= RETRACE_Z
+                    broken = z < -INVALID_Z
                 else:
-                       STATE["ext_z"] = min(STATE["ext_z"], z)
-                       pulled = z >= -PULLBACK_Z or (z - STATE["ext_z"]) >= RETRACE_Z
-                       broken = z > INVALID_Z
+                    STATE["ext_z"] = min(STATE["ext_z"], z)
+                    pulled = z >= -PULLBACK_Z or (z - STATE["ext_z"]) >= RETRACE_Z
+                    broken = z > INVALID_Z
                 if broken:
                     setup = None
+                  
                 elif pulled and setup is None:
-                    setup = {"direction": bias["direction"], "armed_at": now,
+                    setup = {"direction": bias["direction"], 
+                             "armed_at": now,
                              "expires_at": now + ARM_HOURS * 3600}
             else:
                 setup = None
