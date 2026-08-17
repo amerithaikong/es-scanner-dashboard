@@ -78,6 +78,7 @@ BIAS_MIN_PCT = float(os.environ.get("BIAS_MIN_PCT", 60))  # % of bias weight to 
 CONF_MIN = float(os.environ.get("CONF_MIN", 75))          # % to fire an alert
 ARM_HOURS = float(os.environ.get("ARM_HOURS", 8))         # armed setup lifetime
 PULLBACK_Z = 0.25          # long: armed when z <= +0.25 (at/through midline)
+RETRACE_Z = float(os.environ.get("RETRACE_Z", 0.6))
 INVALID_Z = 2.75           # pullback deeper than this against trend = broken
 CHASE_Z = 0.35             # no entry if price already beyond mid +0.35s in trend dir
 RSI_LEN, EMA_FAST, EMA_SLOW = 14, 50, 200
@@ -124,6 +125,8 @@ STATE = {
     "charts": {"5m": {"t": [], "c": []}, "15m": {"t": [], "c": []}, "1h": {"t": [], "c": []}},
     "bias": None,            # direction, pct, factors[], slope, r2, z, lookback, ...
     "setup": None,           # {direction, armed_at, expires_at}  when armed
+    "ext_z": None, 
+    "ext_dir": None,
     "trigger": None,         # factors[], mandatory_ok
     "avoid": [],             # active avoid-filter reasons
     "confidence": None,
@@ -662,9 +665,17 @@ def scanner_loop():
                           setup["direction"] != bias["direction"]):
                 setup = None
             if bias["quality_ok"] and bias["direction"]:
-                z = bias["z"]
-                pulled = z <= PULLBACK_Z if bias["direction"] == "LONG" else z >= -PULLBACK_Z
-                broken = z < -INVALID_Z if bias["direction"] == "LONG" else z > INVALID_Z
+               z = bias["z"]
+               if STATE["ext_dir"] != bias["direction"] or STATE["ext_z"] is None:
+                       STATE["ext_z"], STATE["ext_dir"] = z, bias["direction"]
+               if bias["direction"] == "LONG":
+                       STATE["ext_z"] = max(STATE["ext_z"], z)
+                       pulled = z <= PULLBACK_Z or (STATE["ext_z"] - z) >= RETRACE_Z
+                       broken = z < -INVALID_Z
+                    else:
+                       STATE["ext_z"] = min(STATE["ext_z"], z)
+                       pulled = z >= -PULLBACK_Z or (z - STATE["ext_z"]) >= RETRACE_Z
+                       broken = z > INVALID_Z
                 if broken:
                     setup = None
                 elif pulled and setup is None:
@@ -683,6 +694,7 @@ def scanner_loop():
 
                     if maybe_alert(setup["direction"], conf, bias, trig):
                         setup = None  # consumed
+                        STATE["ext_z"] = bias["z"]
 
             with LOCK:
                 STATE["last_price"] = round(last_price, 2)
