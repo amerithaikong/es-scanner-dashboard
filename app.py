@@ -51,7 +51,8 @@ import smtplib
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
 
@@ -437,16 +438,27 @@ def in_alert_window():
         return False
     hhmm = now_et.strftime("%H:%M")
     return ALERT_WINDOW_START <= hhmm < ALERT_WINDOW_END
+  
+ET = ZoneInfo("America/New_York")
 
+def session_date():
+    """CME trading day - starts 18:00 ET, so evening bars belong to the next date."""
+    et = datetime.now(timezone.utc).astimezone(ET)
+    d = et.date()
+    if et.hour >= 18:
+        d += timedelta(days=1)
+    return d.isoformat()
+  
 def maybe_alert(direction, conf, bias, trig):
     if not in_alert_window():
         return False
     now = time.time()
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = session_date()
     with LOCK:
         if STATE["alerts_date"] != today:
             STATE["alerts_date"], STATE["alerts_today"] = today, 0
-        if MAX_ALERTS_PER_DAY and STATE["alerts_today"] >= MAX_ALERTS_PER_DAY:
+        n_today = sum(1 for a in STATE["alerts"] if a.get("session") == today)
+        if MAX_ALERTS_PER_DAY and n_today >= MAX_ALERTS_PER_DAY:
             return False
         if now - STATE["last_alert_ts"] < COOLDOWN_MIN * 60:
             return False
@@ -777,7 +789,10 @@ def api_status():
                        "expires_in": max(0, int(setup["expires_at"] - time.time()))}
                       if setup else None),
             "trigger": STATE["trigger"], "confidence": STATE["confidence"],
-            "alerts": STATE["alerts"], "alerts_today": STATE["alerts_today"],
+            "alerts": STATE["alerts"],
+            "alerts_today": sum(1 for a in STATE["alerts"]
+                            if a.get("session") == session_date()),
+            "session_date": session_date(),
             "max_alerts": MAX_ALERTS_PER_DAY or None,
             "cooldown_remaining": max(0, int(COOLDOWN_MIN * 60 -
                                              (time.time() - STATE["last_alert_ts"])))
