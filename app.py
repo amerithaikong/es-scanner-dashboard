@@ -649,7 +649,7 @@ def scanner_loop():
     print(f"[boot] pid {os.getpid()} scanner starting", flush=True)
     last_slow, htf, prev_close = 0.0, None, None
     while True:
-          try:
+        try:
             with LOCK:
               roll_session()
             mark("fetch 5m", bump=True)
