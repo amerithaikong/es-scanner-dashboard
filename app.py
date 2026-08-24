@@ -56,6 +56,7 @@ from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
 
+
 import numpy as np
 import pandas as pd
 import requests
@@ -130,7 +131,7 @@ STATE = {
     "trigger": None,         # factors[], mandatory_ok
     "avoid": [],             # active avoid-filter reasons
     "confidence": None,
-    "alerts": [], "alerts_today": 0, "alerts_date": "", "last_alert_ts": 0.0,
+    "alerts": [], "alerts_prev": [], "alerts_today": 0, "alerts_date": "", "last_alert_ts": 0.0,
         "last_resolved": True,
     "feed": {"status": "starting", "detail": "", "errors": 0},
     "loop": {"n": 0, "phase": "boot", "ts": None, "epoch": None},
@@ -407,6 +408,28 @@ def eval_avoid(htf: pd.DataFrame, ltf: pd.DataFrame, bias: dict, armed: bool = F
 
     return reasons
 
+# ----------------------------------------------------------------------
+# Session rollover
+# ----------------------------------------------------------------------
+SCANNER_TZ = ZoneInfo(os.environ.get("SCANNER_TZ", "America/Los_Angeles"))
+
+def trading_day() -> str:
+    """Local calendar date. Rolls at local midnight."""
+    return datetime.now(timezone.utc).astimezone(SCANNER_TZ).date().isoformat()
+
+def roll_session() -> bool:
+    """Wipe per-day state when the local date changes. Call with LOCK held."""
+    today = trading_day()
+    if STATE["alerts_date"] == today:
+        return False
+    STATE["alerts_date"] = today
+    STATE["alerts_today"] = 0
+    STATE["last_alert_ts"] = 0.0
+    STATE["setup"] = None
+    STATE["alerts_prev"] = STATE["alerts"][:20]
+    STATE["alerts"] = []
+    return True
+
 
 # ----------------------------------------------------------------------
 # Alerts
@@ -455,13 +478,10 @@ def session_date():
 def maybe_alert(direction, conf, bias, trig):
     if not in_alert_window():
         return False
-    now = time.time()
-    today = session_date()
+      now = time.time()
     with LOCK:
-        if STATE["alerts_date"] != today:
-            STATE["alerts_date"], STATE["alerts_today"] = today, 0
-        n_today = sum(1 for a in STATE["alerts"] if a.get("session") == today)
-        if MAX_ALERTS_PER_DAY and n_today >= MAX_ALERTS_PER_DAY:
+        roll_session()
+        if STATE["alerts_today"] >= MAX_ALERTS_PER_DAY:
             return False
         if now - STATE["last_alert_ts"] < COOLDOWN_MIN * 60:
             return False
@@ -485,6 +505,7 @@ def maybe_alert(direction, conf, bias, trig):
                  "risk": risk, "direction": direction,
                  "confidence": round(conf), "entry": round(entry, 2),
                  "stop": round(stop, 2), "t1": round(t1, 2),
+                 "session": STATE["alerts_date"],
                  "factors": [{"name": f["name"], "ok": f["ok"], "na": f["na"]}
                              for f in bias["factors"] + trig["factors"]]}
         STATE["alerts"].insert(0, alert)
@@ -628,7 +649,9 @@ def scanner_loop():
     print(f"[boot] pid {os.getpid()} scanner starting", flush=True)
     last_slow, htf, prev_close = 0.0, None, None
     while True:
-        try:
+          try:
+            with LOCK:
+              roll_session()
             mark("fetch 5m", bump=True)
             ltf = fetch("5m", "2d")
             closes = ltf["Close"]
@@ -792,6 +815,7 @@ def index():
 @app.route("/api/status")
 def api_status():
     with LOCK:
+        roll_session()
         setup = STATE["setup"]
         return jsonify({
             "symbol": SYMBOL,
@@ -803,11 +827,10 @@ def api_status():
                        "expires_in": max(0, int(setup["expires_at"] - time.time()))}
                       if setup else None),
             "trigger": STATE["trigger"], "confidence": STATE["confidence"],
-            "alerts": STATE["alerts"],
-            "alerts_today": sum(1 for a in STATE["alerts"]
-                            if a.get("session") == session_date()),
-            "session_date": session_date(),
-            "max_alerts": MAX_ALERTS_PER_DAY or None,
+            "alerts": STATE["alerts"], "alerts_prev": STATE["alerts_prev"],
+            "alerts_today": STATE["alerts_today"], "session": STATE["alerts_date"],
+            "max_alerts": MAX_ALERTS_PER_DAY or None, 
+            "session_date": session_date()
             "cooldown_remaining": max(0, int(COOLDOWN_MIN * 60 -
                                              (time.time() - STATE["last_alert_ts"])))
             if STATE["last_alert_ts"] else 0,
