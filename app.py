@@ -478,7 +478,7 @@ def session_date():
 def maybe_alert(direction, conf, bias, trig):
     if not in_alert_window():
         return False
-      now = time.time()
+    now = time.time()
     with LOCK:
         roll_session()
         if STATE["alerts_today"] >= MAX_ALERTS_PER_DAY:
