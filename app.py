@@ -830,15 +830,14 @@ def api_status():
             "alerts": STATE["alerts"], "alerts_prev": STATE["alerts_prev"],
             "alerts_today": STATE["alerts_today"], "session": STATE["alerts_date"],
             "max_alerts": MAX_ALERTS_PER_DAY or None, 
-            "session_date": session_date()
             "cooldown_remaining": max(0, int(COOLDOWN_MIN * 60 -
                                              (time.time() - STATE["last_alert_ts"])))
             if STATE["last_alert_ts"] else 0,
             "feed": STATE["feed"], "loop": STATE["loop"],
             "params": {"min_r2": MIN_R2, "min_slope": MIN_SLOPE,
                        "bias_min_pct": BIAS_MIN_PCT, "conf_min": CONF_MIN,
-                       "stop_pts": STOP_PTS, "target1_pts": TARGET1_PTS},
-                       "conf_min_overnight": CONF_MIN_OVERNIGHT,
+                       "stop_pts": STOP_PTS, "target1_pts": TARGET1_PTS,
+                       "conf_min_overnight": CONF_MIN_OVERNIGHT},
 
         })
 
