@@ -77,7 +77,7 @@ MIN_R2 = float(os.environ.get("MIN_R2", 0.45))
 MIN_SLOPE = float(os.environ.get("MIN_SLOPE", 0.30))      # pts per 1h bar
 MIN_ATR_TRADE = float(os.environ.get("MIN_ATR_TRADE", 2.5))
 BIAS_MIN_PCT = float(os.environ.get("BIAS_MIN_PCT", 60))  # % of bias weight to arm
-CONF_MIN = float(os.environ.get("CONF_MIN", 75))          # % to fire an alert
+CONF_MIN = float(os.environ.get("CONF_MIN", 80))          # % to fire an alert
 ARM_HOURS = float(os.environ.get("ARM_HOURS", 8))         # armed setup lifetime
 PULLBACK_Z = 0.25          # long: armed when z <= +0.25 (at/through midline)
 RETRACE_Z = float(os.environ.get("RETRACE_Z", 0.6))
@@ -87,8 +87,8 @@ RSI_LEN, EMA_FAST, EMA_SLOW = 14, 50, 200
 STOP_PTS, TARGET1_PTS = 10.0, 10.0          # fallbacks only
 STOP_ATR_MULT = float(os.environ.get("STOP_ATR_MULT", 1.5))
 MIN_STOP_PTS  = float(os.environ.get("MIN_STOP_PTS", 8.0))
-MAX_STOP_PTS  = float(os.environ.get("MAX_STOP_PTS", 20.0))
-TARGET_R      = float(os.environ.get("TARGET_R", 0.75))
+MAX_STOP_PTS  = float(os.environ.get("MAX_STOP_PTS", 13.0))
+TARGET_R      = float(os.environ.get("TARGET_R", 1.0))
 SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", 12))   # 5m bars for swing stop
 
 MAX_BAR_ATR = float(os.environ.get("MAX_BAR_ATR", 1.3))   # trigger bar width cap
@@ -97,7 +97,8 @@ MAX_EXT_EMA = float(os.environ.get("MAX_EXT_EMA", 1.2))   # ATRs above 5m 20EMA
 MAX_ALERTS_PER_DAY = int(os.environ.get("MAX_ALERTS_PER_DAY", 0))   # 0 = unlimited
 COOLDOWN_MIN = int(os.environ.get("COOLDOWN_MIN", 45))
 DUPE_PTS = float(os.environ.get("DUPE_PTS", 12.0))
-CONF_MIN_OVERNIGHT = float(os.environ.get("CONF_MIN_OVERNIGHT", 90))
+CONF_MIN_OVERNIGHT = float(os.environ.get("CONF_MIN_OVERNIGHT", 75))
+LOSS_COOLDOWN_MIN = int(os.environ.get("LOSS_COOLDOWN_MIN", 180))  # same-direction block after a stop-out
 
 POLL_FAST = int(os.environ.get("POLL_FAST", 30))
 POLL_SLOW = int(os.environ.get("POLL_SLOW", 180))
@@ -140,6 +141,7 @@ STATE = {
     "confidence": None,
     "alerts": [], "alerts_prev": [], "alerts_today": 0, "alerts_date": "", "last_alert_ts": 0.0,
         "last_resolved": True,
+    "last_loss": None,       # {"ts", "direction"} of the most recent stop-out
     "feed": {"status": "starting", "detail": "", "errors": 0,
              "since": None, "last_ok": None, "backoff_s": 0, "last_http": None},
     "feed_log": deque(maxlen=FEED_LOG_MAX),   # newest first; see feed_log_add()
@@ -285,8 +287,6 @@ def eval_bias(htf: pd.DataFrame, ltf: pd.DataFrame):
     keys = ["slope_dir", "slope_strength", "r2", "ema", "structure", "vwap_bias"]
     pts = avail = 0.0
     for f, kname in zip(factors, keys):
-        if f["na"]:
-            continue
         avail += W_BIAS[kname]
         if f["ok"]:
             pts += W_BIAS[kname]
@@ -363,8 +363,6 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
     keys = ["momentum_bar", "rsi_cross", "macd_hist", "volume", "vwap_side"]
     pts = avail = 0.0
     for f, kname in zip(factors, keys):
-        if f["na"]:
-            continue
         avail += W_TRIG[kname]
         if f["ok"]:
             pts += W_TRIG[kname]
@@ -490,9 +488,13 @@ def maybe_alert(direction, conf, bias, trig):
     now = time.time()
     with LOCK:
         roll_session()
-        if STATE["alerts_today"] >= MAX_ALERTS_PER_DAY:
+        if MAX_ALERTS_PER_DAY and STATE["alerts_today"] >= MAX_ALERTS_PER_DAY:
             return False
         if now - STATE["last_alert_ts"] < COOLDOWN_MIN * 60:
+            return False
+        ll = STATE.get("last_loss")
+        if (ll and ll["direction"] == direction
+                and now - ll["ts"] < LOSS_COOLDOWN_MIN * 60):
             return False
         prev = STATE["alerts"][0] if STATE["alerts"] else None
         if (prev and prev["direction"] == direction
@@ -506,7 +508,7 @@ def maybe_alert(direction, conf, bias, trig):
                       else (trig["swing"] - entry + 0.75)
         risk = max(vol_risk, struct_risk)
         risk = round(min(max(risk, MIN_STOP_PTS), MAX_STOP_PTS) * 4) / 4
-        t1_pts = round(min(TARGET_R * risk, TARGET1_PTS) * 4) / 4
+        t1_pts = round(TARGET_R * risk * 4) / 4
         stop = entry - risk if direction == "LONG" else entry + risk
         t1 = entry + t1_pts if direction == "LONG" else entry - t1_pts
 
@@ -778,8 +780,19 @@ def scanner_loop():
                         done = last_price >= p["t1"] or last_price <= p["stop"]
                     else:
                         done = last_price <= p["t1"] or last_price >= p["stop"]
+                                        if done:
+                        STATE["last_resolved"] = True
+                        stopped = (last_price <= p["stop"] if p["direction"] == "LONG"
+                                   else last_price >= p["stop"])
                     if done:
                         STATE["last_resolved"] = True
+                        stopped = (last_price <= p["stop"] if p["direction"] == "LONG"
+                                   else last_price >= p["stop"])
+                        if stopped:
+                            STATE["last_loss"] = {"ts": time.time(),
+                                                  "direction": p["direction"]}
+                            STATE["ext_z"] = None   # force a fresh pullback before re-arming
+                            setup = None
                   
                 if prev_close:
                     STATE["prev_close"] = round(prev_close, 2)
