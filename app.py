@@ -51,6 +51,7 @@ import smtplib
 import threading
 import time
 import traceback
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
@@ -104,6 +105,12 @@ POLL_SLOW = int(os.environ.get("POLL_SLOW", 180))
 ALERT_WINDOW_START = os.environ.get("ALERT_WINDOW_START", "06:00")  # ET, premarket open
 ALERT_WINDOW_END = os.environ.get("ALERT_WINDOW_END", "20:00")      # ET, RTH close
 WATCHDOG_SEC = int(os.environ.get("WATCHDOG_SEC", 300))   # restart if loop stalls
+# Feed resilience: exponential backoff after consecutive fetch failures
+# (POLL_FAST, 2x, 4x ... capped at BACKOFF_MAX seconds) and a per-host
+# cooldown after a 429 so we stop hammering an edge that already said no.
+BACKOFF_MAX = int(os.environ.get("BACKOFF_MAX", 600))
+HOST_COOLDOWN_429 = int(os.environ.get("HOST_COOLDOWN_429", 300))
+FEED_LOG_MAX = 50
 CHART_BARS = 200
 
 # Weights (points). VWAP weights are excluded from the denominator outside RTH.
@@ -133,7 +140,9 @@ STATE = {
     "confidence": None,
     "alerts": [], "alerts_prev": [], "alerts_today": 0, "alerts_date": "", "last_alert_ts": 0.0,
         "last_resolved": True,
-    "feed": {"status": "starting", "detail": "", "errors": 0},
+    "feed": {"status": "starting", "detail": "", "errors": 0,
+             "since": None, "last_ok": None, "backoff_s": 0, "last_http": None},
+    "feed_log": deque(maxlen=FEED_LOG_MAX),   # newest first; see feed_log_add()
     "loop": {"n": 0, "phase": "boot", "ts": None, "epoch": None},
 }
 
@@ -576,18 +585,53 @@ def get_with_deadline(url, deadline=25):
     return result["r"]
 
 
+class YahooHTTPError(RuntimeError):
+    """Non-2xx from a Yahoo host. Carries status + host so the feed log can
+    say *which* hop failed and *how* (429 block vs 500 backend vs 401)."""
+    def __init__(self, status, base, head=""):
+        self.status, self.base, self.head = status, base, head
+        super().__init__(f"HTTP {status} from {base} {head!r}")
+
+
+# base -> epoch until which we skip it (set after a 429)
+_host_cooldown = {}
+_host_last = {}   # base -> {"http": .., "ts": .., "msg": ..}  (for /api/debug)
+
+
+def _note_host(base, http=None, msg=""):
+    _host_last[base] = {"http": http, "msg": msg[:120],
+                        "ts": datetime.now(timezone.utc).isoformat()}
+
+
+def feed_log_add(status, msg, http=None, host=None):
+    """Ring buffer of feed events (newest first). Survives until restart, so
+    a week-long outage leaves a trail instead of one truncated string."""
+    with LOCK:
+        STATE["feed_log"].appendleft({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "status": status, "http": http, "host": host, "msg": str(msg)[:200]})
+
+
 def yahoo_chart(interval, range_, session=None):
-    """Direct Yahoo v8 chart API via proxy/hosts, hard deadline per request."""
+    """Direct Yahoo v8 chart API via proxy/hosts, hard deadline per request.
+    Hosts that returned 429 recently are skipped for HOST_COOLDOWN_429s."""
     session = session or _yh_session
     last_err = None
-    for attempt, base in enumerate(YH_BASES + YH_BASES[:1]):
+    now = time.time()
+    bases = [b for b in YH_BASES if _host_cooldown.get(b, 0) <= now]
+    if not bases:   # everything is cooling down - try the first one anyway
+        bases = YH_BASES[:1]
+    for attempt, base in enumerate(bases):
         try:
             url = (f"{base}/v8/finance/chart/{requests.utils.quote(SYMBOL)}"
                    f"?interval={interval}&range={range_}")
-            r = get_with_deadline( url)
+            r = get_with_deadline(url)
+            head = r.text[:80].replace("\n", " ")
             if r.status_code == 429:
-                raise RuntimeError("HTTP 429 rate limited")
-            r.raise_for_status()
+                _host_cooldown[base] = time.time() + HOST_COOLDOWN_429
+                raise YahooHTTPError(429, base, head)
+            if r.status_code >= 400:
+                raise YahooHTTPError(r.status_code, base, head)
             res = r.json()["chart"]["result"][0]
             ts = res.get("timestamp")
             q = res["indicators"]["quote"][0]
@@ -601,13 +645,17 @@ def yahoo_chart(interval, range_, session=None):
             if len(df) < 5:
                 raise RuntimeError(f"empty {interval} response")
             df["Volume"] = df["Volume"].fillna(0)
+            _note_host(base, r.status_code, f"ok {len(df)} bars")
             return df
         except Exception as e:
             last_err = e
+            http = getattr(e, "status", None)
+            _note_host(base, http, f"{type(e).__name__}: {e}")
             print(f"[warn] fetch attempt {attempt+1} {base}: "
                   f"{type(e).__name__}: {str(e)[:100]}", flush=True)
-            time.sleep(min(3.0, 1.5 * (attempt + 1)))
-    raise RuntimeError(f"yahoo chart api failed: {last_err}")
+            if attempt < len(bases) - 1:
+                time.sleep(1.5)
+    raise RuntimeError(f"yahoo chart api failed: {last_err}") from last_err
 
 
 
@@ -752,18 +800,44 @@ def scanner_loop():
                 STATE["trigger"] = ({"factors": trig["factors"],
                                      "mandatory_ok": trig["mandatory_ok"]} if trig else None)
                 STATE["confidence"] = round(conf, 1) if conf is not None else None
-                STATE["feed"] = {"status": "live", "detail": "", "errors": 0}
+                was_down = STATE["feed"]["errors"] > 0
+                STATE["feed"] = {"status": "live", "detail": "", "errors": 0,
+                                 "since": None, "backoff_s": 0, "last_http": 200,
+                                 "last_ok": datetime.now(timezone.utc).isoformat()}
+            if was_down:
+                feed_log_add("recovered", "feed back to live")
+            sleep_s = POLL_FAST
 
         except Exception as e:
+            cause = e.__cause__ if isinstance(e.__cause__, Exception) else e
+            http = getattr(cause, "status", None)
+            host = getattr(cause, "base", None)
             with LOCK:
-                STATE["feed"]["errors"] += 1
-                STATE["feed"]["status"] = "stale" if STATE["last_price"] else "error"
-                STATE["feed"]["detail"] = str(e)[:200]
-            print(f"[error] scanner: {e}")
-            traceback.print_exc()
+                f = STATE["feed"]
+                f["errors"] += 1
+                f["status"] = "stale" if STATE["last_price"] else "error"
+                f["detail"] = str(e)[:200]
+                f["last_http"] = http
+                f["since"] = f["since"] or datetime.now(timezone.utc).isoformat()
+                n = f["errors"]
+                # 30s, 60s, 120s, 240s, 480s, then BACKOFF_MAX (default 600s)
+                sleep_s = min(BACKOFF_MAX, POLL_FAST * (2 ** min(n - 1, 8)))
+                f["backoff_s"] = sleep_s
+            feed_log_add("error", f"{type(cause).__name__}: {cause}", http, host)
+            print(f"[error] scanner ({n} in a row, next try in {sleep_s}s): {e}",
+                  flush=True)
+            if n == 1:
+                traceback.print_exc()
 
-        mark("sleep")
-        time.sleep(POLL_FAST)
+        # Sleep in short slices, heartbeating each one, so a long backoff
+        # never looks like a stall to the watchdog.
+        end = time.time() + sleep_s
+        while True:
+            mark("sleep" if sleep_s == POLL_FAST else f"backoff {sleep_s}s")
+            left = end - time.time()
+            if left <= 0:
+                break
+            time.sleep(min(15, left))
 
 
 def watchdog_loop():
@@ -834,6 +908,7 @@ def api_status():
                                              (time.time() - STATE["last_alert_ts"])))
             if STATE["last_alert_ts"] else 0,
             "feed": STATE["feed"], "loop": STATE["loop"],
+            "feed_log": list(STATE["feed_log"])[:10],
             "params": {"min_r2": MIN_R2, "min_slope": MIN_SLOPE,
                        "bias_min_pct": BIAS_MIN_PCT, "conf_min": CONF_MIN,
                        "stop_pts": STOP_PTS, "target1_pts": TARGET1_PTS,
@@ -855,8 +930,14 @@ def api_chart():
 @app.route("/api/debug")
 def api_debug():
     """One-shot Yahoo connectivity probe from this server, per host."""
-    out = {"hosts": {}, "proxy_configured": bool(YH_PROXY),
-           "loop": STATE["loop"], "feed": STATE["feed"]}
+    now = time.time()
+    with LOCK:
+        out = {"hosts": {}, "proxy_configured": bool(YH_PROXY),
+               "loop": dict(STATE["loop"]), "feed": dict(STATE["feed"]),
+               "feed_log": list(STATE["feed_log"]),
+               "host_last_result": dict(_host_last),
+               "host_cooldown_remaining_s": {
+                   b: max(0, int(t - now)) for b, t in _host_cooldown.items()}}
     for base in YH_BASES:
         try:
             url = (f"{base}/v8/finance/chart/"
