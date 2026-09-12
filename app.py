@@ -83,6 +83,12 @@ PULLBACK_Z = 0.25          # long: armed when z <= +0.25 (at/through midline)
 RETRACE_Z = float(os.environ.get("RETRACE_Z", 0.6))
 INVALID_Z = 2.75           # pullback deeper than this against trend = broken
 CHASE_Z = 0.35             # no entry if price already beyond mid +0.35s in trend dir
+TRIG_Z_MAX = float(os.environ.get("TRIG_Z_MAX", 0.5))   # trigger only within this many sigma of midline
+CLOSE_POS_MIN = float(os.environ.get("CLOSE_POS_MIN", 0.7))  # trigger bar must close in top/bottom 30%
+# Retest entry: after the trigger bar, wait for price to come back to the
+# breakout level (prior bar high/low) before alerting. 0 = alert at market.
+RETEST_BARS = int(os.environ.get("RETEST_BARS", 3))     # how many 5m bars to wait
+RETEST_TOL = float(os.environ.get("RETEST_TOL", 0.5))   # pts of slack around the level
 RSI_LEN, EMA_FAST, EMA_SLOW = 14, 50, 200
 STOP_PTS, TARGET1_PTS = 10.0, 10.0          # fallbacks only
 STOP_ATR_MULT = float(os.environ.get("STOP_ATR_MULT", 1.5))
@@ -142,6 +148,7 @@ STATE = {
     "alerts": [], "alerts_prev": [], "alerts_today": 0, "alerts_date": "", "last_alert_ts": 0.0,
         "last_resolved": True,
     "last_loss": None,       # {"ts", "direction"} of the most recent stop-out
+    "pending": None,         # trigger fired, waiting for retest fill (see RETEST_BARS)
     "feed": {"status": "starting", "detail": "", "errors": 0,
              "since": None, "last_ok": None, "backoff_s": 0, "last_http": None},
     "feed_log": deque(maxlen=FEED_LOG_MAX),   # newest first; see feed_log_add()
@@ -327,7 +334,10 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
    
   
     prev_h, prev_l = float(closed["High"].iloc[-2]), float(closed["Low"].iloc[-2])
-    momentum = c > prev_h if long_ else c < prev_l
+    bar_h, bar_l = float(closed["High"].iloc[-1]), float(closed["Low"].iloc[-1])
+    close_pos = (c - bar_l) / (bar_h - bar_l) if bar_h > bar_l else 1.0
+    strong_close = close_pos >= CLOSE_POS_MIN if long_ else close_pos <= 1 - CLOSE_POS_MIN
+    momentum = (c > prev_h if long_ else c < prev_l) and strong_close
 
     r = rsi(close, RSI_LEN)
     r_now, r_win = float(r.iloc[-1]), r.iloc[-5:-1]
@@ -351,8 +361,8 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
         vwap_f = factor("VWAP side", False, na=True, detail="RTH only")
 
     factors = [
-        factor("Momentum resumes (closes beyond prior bar)", momentum,
-               detail=f"close {c:.2f}"),
+        factor("Momentum resumes (beyond prior bar, strong close)", momentum,
+               detail=f"close {c:.2f}, {close_pos:.0%} of bar"),
         factor(f"RSI crossed {'above' if long_ else 'below'} 50", rsi_ok,
                detail=f"RSI {r_now:.0f}"),
         factor("MACD histogram improving", macd_ok),
@@ -368,6 +378,7 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
             pts += W_TRIG[kname]
         return {"factors": factors, "pts": pts, "avail": avail,
             "mandatory_ok": momentum, "entry": c,
+            "level": prev_h if long_ else prev_l, "close_pos": round(close_pos, 2),
             "atr5": round(a5, 2), "swing": round(swing, 2),
             "ema20": round(ema20, 2), "limit": round(limit * 4) / 4}
 
@@ -433,6 +444,7 @@ def roll_session() -> bool:
     STATE["alerts_today"] = 0
     STATE["last_alert_ts"] = 0.0
     STATE["setup"] = None
+    STATE["pending"] = None
     STATE["alerts_prev"] = STATE["alerts"][:20]
     STATE["alerts"] = []
     return True
@@ -760,14 +772,41 @@ def scanner_loop():
                 setup = None
 
             trig, conf = None, None
-            if setup:
+            # --- stage 2: a trigger already fired, wait for the retest fill ---
+            pend = STATE["pending"]
+            if pend:
+                bar = ltf.iloc[-1]          # forming 5m bar
+                lvl, d = pend["level"], pend["direction"]
+                touched = (float(bar["Low"]) <= lvl + RETEST_TOL if d == "LONG"
+                           else float(bar["High"]) >= lvl - RETEST_TOL)
+                if now >= pend["expires_at"] or bias["direction"] != d:
+                    print(f"[retest] {d} expired without fill at {lvl}", flush=True)
+                    STATE["pending"] = None
+                    setup = None
+                    STATE["ext_z"] = bias["z"]
+                elif touched:
+                    t2 = dict(pend["trig"]); t2["entry"] = lvl; t2["limit"] = lvl
+                    if maybe_alert(d, pend["conf"], pend["bias"], t2):
+                        setup = None
+                        STATE["ext_z"] = bias["z"]
+                    STATE["pending"] = None
+            # --- stage 1: look for a trigger bar ---
+            elif setup:
                 trig = eval_trigger(ltf, setup["direction"], bias)
                 denom = bias["avail"] + trig["avail"]
                 conf = 100 * (bias["pts"] + trig["pts"]) / denom if denom else 0.0
                 conf_needed = CONF_MIN if bias.get("in_rth") else CONF_MIN_OVERNIGHT
-                if trig["mandatory_ok"] and not avoid and conf >= conf_needed:
-
-                    if maybe_alert(setup["direction"], conf, bias, trig):
+                near_mid = abs(bias["z"]) <= TRIG_Z_MAX
+                if trig["mandatory_ok"] and near_mid and not avoid and conf >= conf_needed:
+                    if RETEST_BARS > 0:
+                        STATE["pending"] = {
+                            "direction": setup["direction"], "level": trig["level"],
+                            "sig_close": trig["entry"], "conf": conf,
+                            "created_at": now, "expires_at": now + RETEST_BARS * 300,
+                            "bias": bias, "trig": trig}
+                        print(f"[retest] {setup['direction']} trigger at {trig['entry']}, "
+                              f"waiting for {trig['level']} ({RETEST_BARS} bars)", flush=True)
+                    elif maybe_alert(setup["direction"], conf, bias, trig):
                         setup = None  # consumed
                         STATE["ext_z"] = bias["z"]
 
@@ -914,6 +953,10 @@ def api_status():
                        "expires_in": max(0, int(setup["expires_at"] - time.time()))}
                       if setup else None),
             "trigger": STATE["trigger"], "confidence": STATE["confidence"],
+            "pending": ({"direction": STATE["pending"]["direction"],
+                         "level": STATE["pending"]["level"],
+                         "expires_in": max(0, int(STATE["pending"]["expires_at"] - time.time()))}
+                        if STATE["pending"] else None),
             "alerts": STATE["alerts"], "alerts_prev": STATE["alerts_prev"],
             "alerts_today": STATE["alerts_today"], "session": STATE["alerts_date"],
             "max_alerts": MAX_ALERTS_PER_DAY or None, 
