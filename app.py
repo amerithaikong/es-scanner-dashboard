@@ -780,7 +780,7 @@ def scanner_loop():
                         done = last_price >= p["t1"] or last_price <= p["stop"]
                     else:
                         done = last_price <= p["t1"] or last_price >= p["stop"]
-                                        if done:
+                    if done:
                         STATE["last_resolved"] = True
                         stopped = (last_price <= p["stop"] if p["direction"] == "LONG"
                                    else last_price >= p["stop"])
