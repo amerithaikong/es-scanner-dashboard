@@ -186,13 +186,12 @@ a{color:inherit}
 
     <div class="card">
       <h2>Alerts <span class="alert-count" id="alertCount">0 / 2 today</span></h2>
-      <div id="alerts"><div class="empty">No alerts yet. The scanner stays silent unless bias, pullback, trigger and confidence all clear — expect roughly one setup every 1–2 days, sometimes none.</div></div>
+      <div id="alerts"><div class="empty">No alerts yet. The scanner stays silent unless bias, pullback, trigger and confidence all clear. </div></div>
     </div>
   </div>
 
   <div class="footnote">
-    Alert engine: 10&nbsp;pt stop &middot; scale &frac12; at +10 &middot; stop&rarr;BE &middot; trail runner on 5m swings &middot; max 2/day &middot; 120&nbsp;min cooldown.<br>
-    Data: Yahoo Finance (may lag ~1&ndash;2 min). Signals are decision support for manual paper trading — nothing here places orders.
+    Alert engine: 6&nbsp;pt stop &middot; 10&nbsp;pt target &middot; close 50% at target &middot; stop&rarr;BE &middot; trail rest 13&nbsp;pts (manual) &middot; 45&nbsp;min cooldown.<br>
   </div>
 </div>
 
@@ -443,7 +442,7 @@ async function refreshStatus(){
         <div class="alert">
           <span class="conf">${a.confidence}%</span>
           <span class="dirn ${a.direction}">${a.direction}</span> @ ${a.entry.toFixed(2)}
-          <div class="plan">stop ${a.stop.toFixed(2)} · scale ½ at ${a.t1.toFixed(2)} · BE · trail runner</div>
+          <div class="plan">stop ${a.stop.toFixed(2)} · target ${a.t1.toFixed(2)} · close 50% · BE · trail 13 pts</div>
           <div class="plan">${a.factors.filter(f=>f.ok).map(f=>'✓ '+f.name).join('<br>')}</div>
           <div class="when">${DT.fromISO(a.ts).toFormat('ccc dd LLL · HH:mm')} UTC</div>
         </div>`).join('');
