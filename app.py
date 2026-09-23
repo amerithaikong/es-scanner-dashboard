@@ -73,11 +73,11 @@ from flask import Flask, jsonify, render_template, request
 # ----------------------------------------------------------------------
 SYMBOL = "ES=F"
 LOOKBACKS = (40, 20)                                      # dual regression windows
-MIN_R2 = float(os.environ.get("MIN_R2", 0.45))
+MIN_R2 = float(os.environ.get("MIN_R2", 0.90))
 MIN_SLOPE = float(os.environ.get("MIN_SLOPE", 0.30))      # pts per 1h bar
 MIN_ATR_TRADE = float(os.environ.get("MIN_ATR_TRADE", 2.5))
 BIAS_MIN_PCT = float(os.environ.get("BIAS_MIN_PCT", 60))  # % of bias weight to arm
-CONF_MIN = float(os.environ.get("CONF_MIN", 80))          # % to fire an alert
+CONF_MIN = float(os.environ.get("CONF_MIN", 75))          # % to fire an alert
 ARM_HOURS = float(os.environ.get("ARM_HOURS", 8))         # armed setup lifetime
 PULLBACK_Z = 0.25          # long: armed when z <= +0.25 (at/through midline)
 RETRACE_Z = float(os.environ.get("RETRACE_Z", 0.6))
@@ -90,11 +90,16 @@ CLOSE_POS_MIN = float(os.environ.get("CLOSE_POS_MIN", 0.7))  # trigger bar must 
 RETEST_BARS = int(os.environ.get("RETEST_BARS", 3))     # how many 5m bars to wait
 RETEST_TOL = float(os.environ.get("RETEST_TOL", 0.5))   # pts of slack around the level
 RSI_LEN, EMA_FAST, EMA_SLOW = 14, 50, 200
-STOP_PTS, TARGET1_PTS = 10.0, 10.0          # fallbacks only
+STOP_PTS      = float(os.environ.get("STOP_PTS", 6.0))       # fixed stop
+TARGET1_PTS   = float(os.environ.get("TARGET1_PTS", 10.0))   # fixed target
 STOP_ATR_MULT = float(os.environ.get("STOP_ATR_MULT", 1.5))
-MIN_STOP_PTS  = float(os.environ.get("MIN_STOP_PTS", 8.0))
-MAX_STOP_PTS  = float(os.environ.get("MAX_STOP_PTS", 13.0))
-TARGET_R      = float(os.environ.get("TARGET_R", 1.0))
+MIN_STOP_PTS  = float(os.environ.get("MIN_STOP_PTS", STOP_PTS))   # min = max = fixed
+MAX_STOP_PTS  = float(os.environ.get("MAX_STOP_PTS", STOP_PTS))
+TARGET_R      = float(os.environ.get("TARGET_R", 1.0))       # unused while target is fixed
+# Exit plan shown on alerts / dashboard - indicative only, managed manually live
+PARTIAL_PCT   = int(os.environ.get("PARTIAL_PCT", 50))       # % closed at target
+TRAIL_PTS     = float(os.environ.get("TRAIL_PTS", 13.0))     # trail width after target
+
 SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", 12))   # 5m bars for swing stop
 
 MAX_BAR_ATR = float(os.environ.get("MAX_BAR_ATR", 1.3))   # trigger bar width cap
@@ -474,7 +479,10 @@ def format_alert(direction, conf, bias, trig, entry, stop, t1):
         lines.append(f"{mark} {f['name']}")
     lines += ["", f"Limit: {trig.get('limit', entry):.2f}  (mkt {entry:.2f})",
               f"Stop: {stop:.2f}  ({abs(entry - stop):.2f} pts)",
-              f"Scale 1/2 at {t1:.2f}, stop->BE, trail runner on 5m swings"]
+              f"Target: {t1:.2f}  (+{abs(t1 - entry):.0f} pts)",
+              f"Plan: close {PARTIAL_PCT}% at target, stop->BE, "
+              f"trail rest {TRAIL_PTS:.0f} pts (manual)"]
+
     return "\n".join(lines)
   
 def in_alert_window():
@@ -520,7 +528,7 @@ def maybe_alert(direction, conf, bias, trig):
                       else (trig["swing"] - entry + 0.75)
         risk = max(vol_risk, struct_risk)
         risk = round(min(max(risk, MIN_STOP_PTS), MAX_STOP_PTS) * 4) / 4
-        t1_pts = round(TARGET_R * risk * 4) / 4
+        t1_pts = TARGET1_PTS
         stop = entry - risk if direction == "LONG" else entry + risk
         t1 = entry + t1_pts if direction == "LONG" else entry - t1_pts
 
@@ -968,6 +976,7 @@ def api_status():
             "params": {"min_r2": MIN_R2, "min_slope": MIN_SLOPE,
                        "bias_min_pct": BIAS_MIN_PCT, "conf_min": CONF_MIN,
                        "stop_pts": STOP_PTS, "target1_pts": TARGET1_PTS,
+                       "partial_pct": PARTIAL_PCT, "trail_pts": TRAIL_PTS,
                        "conf_min_overnight": CONF_MIN_OVERNIGHT},
 
         })
