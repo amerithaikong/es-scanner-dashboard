@@ -117,6 +117,11 @@ a{color:inherit}
 .conffill.hot{background:linear-gradient(90deg,var(--amber),var(--long))}
 .confmin{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--text);opacity:.5}
 .confread{font-family:var(--mono);font-size:22px;font-weight:700;margin-bottom:10px}
+.whynot{margin:2px 0 10px;padding:8px 10px;border-radius:6px;background:#1A2133;
+  border:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5}
+.whynot .row{display:flex;gap:7px} .whynot .row::before{content:"\25B8";color:var(--amber);flex:none}
+.whynot.clear{border-color:#3DDC9744;color:var(--long)} .whynot.clear .row::before{color:var(--long)}
+.avoid-chip{display:inline-block;
 .avoid-chip{display:inline-block;font-family:var(--mono);font-size:10.5px;color:var(--short);
   border:1px solid #F2555A44;background:#F2555A0E;border-radius:5px;padding:4px 8px;
   margin:8px 6px 0 0}
@@ -180,6 +185,7 @@ a{color:inherit}
       <h2>Signal Confidence <span class="tag" id="confTag">fires at ≥ 75%</span></h2>
       <div class="confbar"><div class="conffill" id="confFill"></div><div class="confmin" id="confMin"></div></div>
       <div class="confread" id="confRead">— %</div>
+      <div class="whynot" id="whyNot"><div class="row">Waiting for first evaluation…</div></div>
       <div id="trigFactors"><div class="empty">Trigger checklist activates while a pullback setup is armed.</div></div>
       <div id="avoidList"></div>
     </div>
@@ -427,6 +433,10 @@ async function refreshStatus(){
       fill.style.width = '0%'; fill.className='conffill';
       $('confRead').textContent = '— %';
     }
+    const wn = $('whyNot'), why = d.why_not || [];
+    wn.className = 'whynot' + (why.length === 1 && why[0].startsWith('All gates clear') ? ' clear' : '');
+    wn.innerHTML = why.length ? why.map(w=>`<div class="row">${w}</div>`).join('')
+                              : '<div class="row">Waiting for first evaluation…</div>';
     if(d.trigger){
       $('trigFactors').innerHTML = d.trigger.factors.map(fRow).join('');
     } else {
