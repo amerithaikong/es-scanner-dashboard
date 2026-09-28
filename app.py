@@ -73,7 +73,7 @@ from flask import Flask, jsonify, render_template, request
 # ----------------------------------------------------------------------
 SYMBOL = "ES=F"
 LOOKBACKS = (40, 20)                                      # dual regression windows
-MIN_R2 = float(os.environ.get("MIN_R2", 0.90))
+MIN_R2 = float(os.environ.get("MIN_R2", 0.60))
 MIN_SLOPE = float(os.environ.get("MIN_SLOPE", 0.30))      # pts per 1h bar
 MIN_ATR_TRADE = float(os.environ.get("MIN_ATR_TRADE", 2.5))
 BIAS_MIN_PCT = float(os.environ.get("BIAS_MIN_PCT", 60))  # % of bias weight to arm
@@ -83,12 +83,12 @@ PULLBACK_Z = 0.25          # long: armed when z <= +0.25 (at/through midline)
 RETRACE_Z = float(os.environ.get("RETRACE_Z", 0.6))
 INVALID_Z = 2.75           # pullback deeper than this against trend = broken
 CHASE_Z = 0.35             # no entry if price already beyond mid +0.35s in trend dir
-TRIG_Z_MAX = float(os.environ.get("TRIG_Z_MAX", 0.5))   # trigger only within this many sigma of midline
+TRIG_Z_MAX = float(os.environ.get("TRIG_Z_MAX", 0.75))   # trigger only within this many sigma of midline
 CLOSE_POS_MIN = float(os.environ.get("CLOSE_POS_MIN", 0.7))  # trigger bar must close in top/bottom 30%
 # Retest entry: after the trigger bar, wait for price to come back to the
 # breakout level (prior bar high/low) before alerting. 0 = alert at market.
-RETEST_BARS = int(os.environ.get("RETEST_BARS", 3))     # how many 5m bars to wait
-RETEST_TOL = float(os.environ.get("RETEST_TOL", 0.5))   # pts of slack around the level
+RETEST_BARS = int(os.environ.get("RETEST_BARS", 4))     # how many 5m bars to wait
+RETEST_TOL = float(os.environ.get("RETEST_TOL", 1.0))   # pts of slack around the level
 RSI_LEN, EMA_FAST, EMA_SLOW = 14, 50, 200
 STOP_PTS      = float(os.environ.get("STOP_PTS", 6.0))       # fixed stop
 TARGET1_PTS   = float(os.environ.get("TARGET1_PTS", 10.0))   # fixed target
@@ -154,6 +154,7 @@ STATE = {
         "last_resolved": True,
     "last_loss": None,       # {"ts", "direction"} of the most recent stop-out
     "pending": None,         # trigger fired, waiting for retest fill (see RETEST_BARS)
+    "why_not": [],           # plain-English list of what is blocking an alert right now
     "feed": {"status": "starting", "detail": "", "errors": 0,
              "since": None, "last_ok": None, "backoff_s": 0, "last_http": None},
     "feed_log": deque(maxlen=FEED_LOG_MAX),   # newest first; see feed_log_add()
