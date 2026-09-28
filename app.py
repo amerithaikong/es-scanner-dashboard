@@ -781,6 +781,7 @@ def scanner_loop():
                 setup = None
 
             trig, conf = None, None
+            near_mid, conf_needed = True, CONF_MIN
             # --- stage 2: a trigger already fired, wait for the retest fill ---
             pend = STATE["pending"]
             if pend:
@@ -819,7 +820,51 @@ def scanner_loop():
                         setup = None  # consumed
                         STATE["ext_z"] = bias["z"]
 
+            # ---- "why not firing" readout for the dashboard ----
+            why = []
+            pend = STATE["pending"]
+            if pend:
+                why.append(f"Retest pending: waiting for price to touch "
+                           f"{pend['level']:.2f} ({max(0, int((pend['expires_at'] - now) / 60))} min left)")
+            elif not bias["direction"]:
+                why.append(f"No bias: 1H slope {bias['slope']:+.2f} is inside "
+                           f"±{MIN_SLOPE} pts/bar (ranging)")
+            elif not bias["quality_ok"]:
+                why.append(f"Bias {bias['pct']:.0f}% < {BIAS_MIN_PCT:.0f}% needed to arm")
+            elif not setup:
+                need = f"z <= +{PULLBACK_Z}" if bias["direction"] == "LONG" else f"z >= -{PULLBACK_Z}"
+                why.append(f"Not armed: waiting for pullback to midline "
+                           f"(z {bias['z']:+.2f}, need {need} or {RETRACE_Z}σ retrace)")
+            else:
+                if trig and not trig["mandatory_ok"]:
+                    why.append(f"Momentum bar ✗: last 5m close is not beyond the prior "
+                               f"bar with a strong close ({trig.get('close_pos', 0):.0%} of bar, "
+                               f"need {'>=' if setup['direction'] == 'LONG' else '<='} "
+                               f"{CLOSE_POS_MIN if setup['direction'] == 'LONG' else 1 - CLOSE_POS_MIN:.0%})")
+                if not near_mid:
+                    why.append(f"Too far from midline: z {bias['z']:+.2f}, need |z| <= {TRIG_Z_MAX}")
+                if conf is not None and conf < conf_needed:
+                    why.append(f"Confidence {conf:.0f}% < {conf_needed:.0f}% "
+                               f"({'RTH' if bias.get('in_rth') else 'overnight'} floor)")
+                for a in avoid:
+                    why.append("Avoid filter: " + a)
+                if not in_alert_window():
+                    why.append(f"Outside alert window {ALERT_WINDOW_START}-{ALERT_WINDOW_END} ET")
+                cd = COOLDOWN_MIN * 60 - (now - STATE["last_alert_ts"])
+                if STATE["last_alert_ts"] and cd > 0:
+                    why.append(f"Cooldown: {int(cd / 60)} min since last alert")
+                ll = STATE.get("last_loss")
+                if ll and ll["direction"] == setup["direction"]:
+                    lc = LOSS_COOLDOWN_MIN * 60 - (now - ll["ts"])
+                    if lc > 0:
+                        why.append(f"Loss cooldown: no {ll['direction']} for {int(lc / 60)} more min")
+                if MAX_ALERTS_PER_DAY and STATE["alerts_today"] >= MAX_ALERTS_PER_DAY:
+                    why.append(f"Daily cap reached ({MAX_ALERTS_PER_DAY})")
+                if not why:
+                    why.append("All gates clear - armed and waiting for the next qualifying 5m bar")
+
             with LOCK:
+                STATE["why_not"] = why
                 STATE["last_price"] = round(last_price, 2)
                 STATE["price_updated"] = datetime.now(timezone.utc).isoformat()
                 p = STATE["alerts"][0] if STATE["alerts"] else None
@@ -828,10 +873,6 @@ def scanner_loop():
                         done = last_price >= p["t1"] or last_price <= p["stop"]
                     else:
                         done = last_price <= p["t1"] or last_price >= p["stop"]
-                    if done:
-                        STATE["last_resolved"] = True
-                        stopped = (last_price <= p["stop"] if p["direction"] == "LONG"
-                                   else last_price >= p["stop"])
                     if done:
                         STATE["last_resolved"] = True
                         stopped = (last_price <= p["stop"] if p["direction"] == "LONG"
@@ -962,6 +1003,7 @@ def api_status():
                        "expires_in": max(0, int(setup["expires_at"] - time.time()))}
                       if setup else None),
             "trigger": STATE["trigger"], "confidence": STATE["confidence"],
+            "why_not": STATE["why_not"],
             "pending": ({"direction": STATE["pending"]["direction"],
                          "level": STATE["pending"]["level"],
                          "expires_in": max(0, int(STATE["pending"]["expires_at"] - time.time()))}
