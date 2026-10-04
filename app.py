@@ -77,18 +77,21 @@ MIN_R2 = float(os.environ.get("MIN_R2", 0.60))
 MIN_SLOPE = float(os.environ.get("MIN_SLOPE", 0.30))      # pts per 1h bar
 MIN_ATR_TRADE = float(os.environ.get("MIN_ATR_TRADE", 2.5))
 BIAS_MIN_PCT = float(os.environ.get("BIAS_MIN_PCT", 60))  # % of bias weight to arm
-CONF_MIN = float(os.environ.get("CONF_MIN", 75))          # % to fire an alert
+CONF_MIN = float(os.environ.get("CONF_MIN", 70))          # % to fire an alert
 ARM_HOURS = float(os.environ.get("ARM_HOURS", 8))         # armed setup lifetime
 PULLBACK_Z = 0.25          # long: armed when z <= +0.25 (at/through midline)
 RETRACE_Z = float(os.environ.get("RETRACE_Z", 0.6))
 INVALID_Z = 2.75           # pullback deeper than this against trend = broken
 CHASE_Z = 0.35             # no entry if price already beyond mid +0.35s in trend dir
-TRIG_Z_MAX = float(os.environ.get("TRIG_Z_MAX", 0.75))   # trigger only within this many sigma of midline
+TRIG_Z_MAX = float(os.environ.get("TRIG_Z_MAX", 1.0))   # trigger only within this many sigma of midline
 CLOSE_POS_MIN = float(os.environ.get("CLOSE_POS_MIN", 0.7))  # trigger bar must close in top/bottom 30%
 # Retest entry: after the trigger bar, wait for price to come back to the
 # breakout level (prior bar high/low) before alerting. 0 = alert at market.
-RETEST_BARS = int(os.environ.get("RETEST_BARS", 4))     # how many 5m bars to wait
-RETEST_TOL = float(os.environ.get("RETEST_TOL", 1.0))   # pts of slack around the level
+RETEST_BARS = int(os.environ.get("RETEST_BARS", 6))     # how many 5m bars to wait
+RETEST_TOL = float(os.environ.get("RETEST_TOL", 1.5))   # pts of slack around the level
+ # If the retest never comes but price is still within this many pts of the
+# level when the wait expires, take it at market instead of dropping it. 0 = off.
+RETEST_CHASE_PTS = float(os.environ.get("RETEST_CHASE_PTS", 3.0))
 RSI_LEN, EMA_FAST, EMA_SLOW = 14, 50, 200
 STOP_PTS      = float(os.environ.get("STOP_PTS", 6.0))       # fixed stop
 TARGET1_PTS   = float(os.environ.get("TARGET1_PTS", 10.0))   # fixed target
@@ -102,14 +105,14 @@ TRAIL_PTS     = float(os.environ.get("TRAIL_PTS", 13.0))     # trail width after
 
 SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", 12))   # 5m bars for swing stop
 
-MAX_BAR_ATR = float(os.environ.get("MAX_BAR_ATR", 1.3))   # trigger bar width cap
+MAX_BAR_ATR = float(os.environ.get("MAX_BAR_ATR", 1.8))   # trigger bar width cap
 MAX_EXT_EMA = float(os.environ.get("MAX_EXT_EMA", 1.2))   # ATRs above 5m 20EMA
 
 MAX_ALERTS_PER_DAY = int(os.environ.get("MAX_ALERTS_PER_DAY", 0))   # 0 = unlimited
 COOLDOWN_MIN = int(os.environ.get("COOLDOWN_MIN", 45))
 DUPE_PTS = float(os.environ.get("DUPE_PTS", 12.0))
 CONF_MIN_OVERNIGHT = float(os.environ.get("CONF_MIN_OVERNIGHT", 75))
-LOSS_COOLDOWN_MIN = int(os.environ.get("LOSS_COOLDOWN_MIN", 180))  # same-direction block after a stop-out
+LOSS_COOLDOWN_MIN = int(os.environ.get("LOSS_COOLDOWN_MIN", 120))  # same-direction block after a stop-out
 
 POLL_FAST = int(os.environ.get("POLL_FAST", 30))
 POLL_SLOW = int(os.environ.get("POLL_SLOW", 180))
@@ -348,6 +351,7 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
     r = rsi(close, RSI_LEN)
     r_now, r_win = float(r.iloc[-1]), r.iloc[-5:-1]
     rsi_ok = (r_win.min() < 50 and r_now > 50) if long_ else (r_win.max() > 50 and r_now < 50)
+    rsi_side = r_now > 50 if long_ else r_now < 50   # half credit: right side, no fresh cross
 
     h = macd_hist(close)
     h3 = h.iloc[-3:].to_numpy()
@@ -370,7 +374,8 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
         factor("Momentum resumes (beyond prior bar, strong close)", momentum,
                detail=f"close {c:.2f}, {close_pos:.0%} of bar"),
         factor(f"RSI crossed {'above' if long_ else 'below'} 50", rsi_ok,
-               detail=f"RSI {r_now:.0f}"),
+               detail=f"RSI {r_now:.0f}" + ("" if rsi_ok else " (no fresh cross: half credit)" if rsi_side else "")),
+
         factor("MACD histogram improving", macd_ok),
         factor("Volume increasing on signal bar", vol_ok, na=vol_na,
                detail="" if vol_na else f"{float(vol.iloc[-1])/vavg:.1f}x avg"),
@@ -382,7 +387,9 @@ def eval_trigger(ltf: pd.DataFrame, direction: str, bias: dict):
         avail += W_TRIG[kname]
         if f["ok"]:
             pts += W_TRIG[kname]
-        return {"factors": factors, "pts": pts, "avail": avail,
+    if rsi_side and not rsi_ok:
+        pts -= W_TRIG["rsi_cross"] / 2   # counted full above; take half back      
+    return {"factors": factors, "pts": pts, "avail": avail,
             "mandatory_ok": momentum, "entry": c,
             "level": prev_h if long_ else prev_l, "close_pos": round(close_pos, 2),
             "atr5": round(a5, 2), "swing": round(swing, 2),
@@ -789,7 +796,23 @@ def scanner_loop():
                 lvl, d = pend["level"], pend["direction"]
                 touched = (float(bar["Low"]) <= lvl + RETEST_TOL if d == "LONG"
                            else float(bar["High"]) >= lvl - RETEST_TOL)
-                if now >= pend["expires_at"] or bias["direction"] != d:
+                px_now = float(bar["Close"])
+                close_enough = (RETEST_CHASE_PTS > 0 and
+                                abs(px_now - lvl) <= RETEST_CHASE_PTS and
+                                (px_now >= lvl if d == "LONG" else px_now <= lvl))
+                if bias["direction"] != d:
+                    STATE["pending"] = None
+                    setup = None
+                    STATE["ext_z"] = bias["z"]
+                elif now >= pend["expires_at"] and not touched and close_enough:
+                    print(f"[retest] {d} no retest, taking market {px_now:.2f} "
+                          f"({abs(px_now - lvl):.1f} pts from {lvl})", flush=True)
+                    t2 = dict(pend["trig"]); t2["entry"] = px_now; t2["limit"] = px_now
+                    if maybe_alert(d, pend["conf"], pend["bias"], t2):
+                        setup = None
+                        STATE["ext_z"] = bias["z"]
+                    STATE["pending"] = None
+                elif now >= pend["expires_at"]:
                     print(f"[retest] {d} expired without fill at {lvl}", flush=True)
                     STATE["pending"] = None
                     setup = None
