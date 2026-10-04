@@ -47,6 +47,7 @@ v2.1 reliability changes:
 """
 
 import os
+import re
 import smtplib
 import threading
 import time
@@ -232,10 +233,10 @@ def swing_structure(htf: pd.DataFrame, k: int = 2, scan: int = 60):
     return "MIXED"
 
 
-def session_vwap(ltf: pd.DataFrame):
+def session_vwap(ltf: pd.DataFrame, now=None):
     """RTH VWAP anchored 09:30 ET; Globex VWAP anchored 18:00 ET otherwise."""
     idx = ltf.index.tz_convert("America/New_York")
-    now = datetime.now(timezone.utc).astimezone(idx.tz)
+    now = (now or datetime.now(timezone.utc)).astimezone(idx.tz)
     in_rth = (now.weekday() < 5 and
               (now.hour, now.minute) >= (9, 30) and now.hour < 16)
     if in_rth:
@@ -258,7 +259,7 @@ def factor(name, ok, na=False, detail=""):
     return {"name": name, "ok": bool(ok), "na": bool(na), "detail": detail}
 
 
-def eval_bias(htf: pd.DataFrame, ltf: pd.DataFrame):
+def eval_bias(htf: pd.DataFrame, ltf: pd.DataFrame, asof=None):
     closed = htf.iloc[:-1]
     close = closed["Close"]
     reg = best_regression(close)
@@ -276,7 +277,7 @@ def eval_bias(htf: pd.DataFrame, ltf: pd.DataFrame):
     structure = swing_structure(closed)
     struct_ok = (structure == "HH/HL") if bull else (structure == "LH/LL")
 
-    vwap, vwap_ok_applicable, in_rth = session_vwap(ltf.iloc[:-1])
+    vwap, vwap_ok_applicable, in_rth = session_vwap(ltf.iloc[:-1], now=asof)
     if vwap_ok_applicable:
         px = float(ltf["Close"].iloc[-1])
         vwap_ok = (px > vwap) if bull else (px < vwap)
@@ -493,8 +494,8 @@ def format_alert(direction, conf, bias, trig, entry, stop, t1):
 
     return "\n".join(lines)
   
-def in_alert_window():
-    now_et = datetime.now(ZoneInfo("America/New_York"))
+def in_alert_window(now=None):
+    now_et = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York"))
     if now_et.weekday() >= 5:          # no alerts Sat/Sun
         return False
     hhmm = now_et.strftime("%H:%M")
@@ -1085,7 +1086,208 @@ def api_debug():
             out["hosts"][base] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
     return jsonify(out)
 
+# ----------------------------------------------------------------------
+# Replay: run the exact live gates over recent history, grade each alert
+# ----------------------------------------------------------------------
+REPLAY = {"status": "idle", "result": None, "error": None, "started": None}
+_replay_lock = threading.Lock()
 
+
+def _replay_run(days, params):
+    ltf = yahoo_chart("5m", "60d")
+    htf = yahoo_chart("1h", "60d")
+    start = ltf.index[-1] - pd.Timedelta(days=days)
+    i0 = int(np.searchsorted(ltf.index, start))
+    i0 = max(i0, 250)
+    hor = int(params.get("horizon_bars", 36))
+    conf_min = float(params.get("conf_min", CONF_MIN))
+    conf_min_on = float(params.get("conf_min_overnight", CONF_MIN_OVERNIGHT))
+    trig_z = float(params.get("trig_z_max", TRIG_Z_MAX))
+    stop_pts = float(params.get("stop_pts", STOP_PTS))
+    tgt_pts = float(params.get("target1_pts", TARGET1_PTS))
+    retest_bars = int(params.get("retest_bars", RETEST_BARS))
+    retest_tol = float(params.get("retest_tol", RETEST_TOL))
+    chase = float(params.get("retest_chase_pts", RETEST_CHASE_PTS))
+    use_window = bool(int(params.get("window", 1)))
+
+    setup = pend = last_loss = None
+    ext_z = ext_dir = None
+    last_alert_ts = 0.0
+    alerts, blocks, armed_bars, bars = [], {}, 0, 0
+    hi = htf.index
+
+    def block(k):
+        blocks[k] = blocks.get(k, 0) + 1
+
+    for i in range(i0, len(ltf)):
+        t = ltf.index[i]
+        ltf_w = ltf.iloc[max(0, i - 400):i + 1]
+        htf_w = htf.iloc[:int(np.searchsorted(hi, t, side="right"))]
+        if len(htf_w) < 60:
+            continue
+        bars += 1
+        now = t.timestamp()
+        bias = eval_bias(htf_w, ltf_w, asof=t.to_pydatetime())
+        avoid = eval_avoid(htf_w, ltf_w, bias, armed=bool(setup))
+
+        if setup and (now > setup["expires_at"] or setup["direction"] != bias["direction"]):
+            setup = None
+        if bias["quality_ok"] and bias["direction"]:
+            z = bias["z"]
+            if ext_dir != bias["direction"] or ext_z is None:
+                ext_z, ext_dir = z, bias["direction"]
+            if bias["direction"] == "LONG":
+                ext_z = max(ext_z, z)
+                pulled = z <= PULLBACK_Z or (ext_z - z) >= RETRACE_Z
+                broken = z < -INVALID_Z
+            else:
+                ext_z = min(ext_z, z)
+                pulled = z >= -PULLBACK_Z or (z - ext_z) >= RETRACE_Z
+                broken = z > INVALID_Z
+            if broken:
+                setup = None
+            elif pulled and setup is None:
+                setup = {"direction": bias["direction"], "armed_at": now,
+                         "expires_at": now + ARM_HOURS * 3600}
+        else:
+            setup = None
+            block("no bias / bias < min" if not bias["direction"] or not bias["quality_ok"] else "x")
+
+        def fire(d, conf, trig, entry, kind):
+            nonlocal last_alert_ts, last_loss, setup, ext_z
+            if use_window and not in_alert_window(t.to_pydatetime()):
+                block("outside alert window"); return False
+            if now - last_alert_ts < COOLDOWN_MIN * 60:
+                block("cooldown"); return False
+            if last_loss and last_loss["direction"] == d and now - last_loss["ts"] < LOSS_COOLDOWN_MIN * 60:
+                block("loss cooldown"); return False
+            stop = entry - stop_pts if d == "LONG" else entry + stop_pts
+            t1 = entry + tgt_pts if d == "LONG" else entry - tgt_pts
+            fwd = ltf.iloc[i + 1:i + 1 + hor]
+            sgn = 1 if d == "LONG" else -1
+            mae = mfe = 0.0
+            outcome, bars_to = "timeout", None
+            for k, (_, b) in enumerate(fwd.iterrows()):
+                mae = max(mae, (entry - float(b["Low"])) * sgn)
+                mfe = max(mfe, (float(b["High"]) - entry) * sgn)
+                hit_stop = float(b["Low"]) <= stop if d == "LONG" else float(b["High"]) >= stop
+                hit_t1 = float(b["High"]) >= t1 if d == "LONG" else float(b["Low"]) <= t1
+                if hit_stop:
+                    outcome, bars_to = "stop", k + 1; break
+                if hit_t1:
+                    outcome, bars_to = "target", k + 1; break
+            et = t.tz_convert("America/New_York")
+            alerts.append({
+                "ts_et": et.strftime("%Y-%m-%d %H:%M"), "direction": d, "entry_kind": kind,
+                "confidence": round(conf, 1), "entry": round(entry, 2), "stop": round(stop, 2),
+                "t1": round(t1, 2), "outcome": outcome, "bars_to_resolve": bars_to,
+                "mae": round(mae, 2), "mfe": round(mfe, 2),
+                "in_rth": bool(bias.get("in_rth")), "z": bias["z"], "r2": bias["r2"],
+                "slope": bias["slope"], "bias_pct": bias["pct"],
+                "factors_ok": [f["name"] for f in bias["factors"] + trig["factors"] if f["ok"]],
+                "factors_fail": [f["name"] for f in bias["factors"] + trig["factors"] if not f["ok"]],
+            })
+            last_alert_ts = now
+            if outcome == "stop":
+                last_loss = {"ts": now + (bars_to or 0) * 300, "direction": d}
+            setup = None
+            ext_z = bias["z"]
+            return True
+
+        if pend:
+            bar = ltf_w.iloc[-1]
+            lvl, d = pend["level"], pend["direction"]
+            touched = (float(bar["Low"]) <= lvl + retest_tol if d == "LONG"
+                       else float(bar["High"]) >= lvl - retest_tol)
+            px = float(bar["Close"])
+            close_enough = chase > 0 and abs(px - lvl) <= chase and (px >= lvl if d == "LONG" else px <= lvl)
+            if bias["direction"] != d:
+                pend = None; setup = None; ext_z = bias["z"]; block("retest: bias flipped")
+            elif touched:
+                fire(d, pend["conf"], pend["trig"], lvl, "retest"); pend = None
+            elif now >= pend["expires_at"] and close_enough:
+                fire(d, pend["conf"], pend["trig"], px, "market-after-no-retest"); pend = None
+            elif now >= pend["expires_at"]:
+                pend = None; setup = None; ext_z = bias["z"]; block("retest: never came back")
+        elif setup:
+            armed_bars += 1
+            trig = eval_trigger(ltf_w, setup["direction"], bias)
+            denom = bias["avail"] + trig["avail"]
+            conf = 100 * (bias["pts"] + trig["pts"]) / denom if denom else 0.0
+            need = conf_min if bias.get("in_rth") else conf_min_on
+            near = abs(bias["z"]) <= trig_z
+            if not trig["mandatory_ok"]:
+                block("momentum bar")
+            elif not near:
+                block("too far from midline")
+            elif avoid:
+                for a in avoid:
+                    block("avoid: " + re.sub(r"[\d.+-]+", "#", a.split(" - ")[0]))
+            elif conf < need:
+                block("confidence < min")
+            else:
+                if retest_bars > 0:
+                    pend = {"direction": setup["direction"], "level": trig["level"],
+                            "conf": conf, "expires_at": now + retest_bars * 300, "trig": trig}
+                else:
+                    fire(setup["direction"], conf, trig, trig["entry"], "market")
+
+    n = len(alerts)
+    wins = sum(a["outcome"] == "target" for a in alerts)
+    stops = sum(a["outcome"] == "stop" for a in alerts)
+    rth = [a for a in alerts if a["in_rth"]]
+    days_covered = max(1, len({a["ts_et"][:10] for a in alerts}) or days)
+    return {
+        "days": days, "bars_evaluated": bars, "bars_armed": armed_bars,
+        "params": {"conf_min": conf_min, "conf_min_overnight": conf_min_on, "trig_z_max": trig_z,
+                   "stop_pts": stop_pts, "target1_pts": tgt_pts, "retest_bars": retest_bars,
+                   "retest_tol": retest_tol, "retest_chase_pts": chase, "window": use_window,
+                   "horizon_bars": hor},
+        "summary": {"alerts": n, "per_day": round(n / days, 2), "targets": wins, "stops": stops,
+                    "timeouts": n - wins - stops,
+                    "win_rate_decided": round(100 * wins / (wins + stops), 1) if wins + stops else None,
+                    "expectancy_pts": round((wins * tgt_pts - stops * stop_pts) / n, 2) if n else None,
+                    "avg_mae": round(float(np.mean([a["mae"] for a in alerts])), 2) if n else None,
+                    "avg_mfe": round(float(np.mean([a["mfe"] for a in alerts])), 2) if n else None,
+                    "rth_alerts": len(rth),
+                    "rth_targets": sum(a["outcome"] == "target" for a in rth),
+                    "rth_stops": sum(a["outcome"] == "stop" for a in rth)},
+        "blocked_by": dict(sorted(blocks.items(), key=lambda kv: -kv[1])),
+        "alerts": alerts,
+        "note": ("Replay evaluates once per completed 5m bar and sees the whole retest bar at once, "
+                 "so fills are slightly optimistic vs live. Stops/targets checked on bar highs/lows."),
+    }
+
+
+@app.route("/api/replay")
+def api_replay():
+    """GET /api/replay?days=10[&conf_min=70&trig_z_max=1.0&stop_pts=6&target1_pts=10
+    &retest_bars=6&retest_tol=1.5&retest_chase_pts=3&window=1&horizon_bars=36]
+    Starts a background replay (first call) and returns the result once done."""
+    days = max(1, min(int(request.args.get("days", 10)), 30))
+    params = {k: v for k, v in request.args.items() if k != "days"}
+    with _replay_lock:
+        if REPLAY["status"] == "running":
+            return jsonify({"status": "running", "started": REPLAY["started"]})
+        if (REPLAY["status"] == "done" and REPLAY["result"]
+                and REPLAY["result"]["days"] == days
+                and request.args.get("fresh") is None
+                and all(str(REPLAY["result"]["params"].get(k)) == v for k, v in params.items()
+                        if k in REPLAY["result"]["params"])):
+            return jsonify({"status": "done", **REPLAY["result"]})
+        REPLAY.update({"status": "running", "result": None, "error": None,
+                       "started": datetime.now(timezone.utc).isoformat()})
+
+    def _bg():
+        try:
+            res = _replay_run(days, params)
+            REPLAY.update({"status": "done", "result": res})
+        except Exception as e:
+            REPLAY.update({"status": "error", "error": f"{type(e).__name__}: {e}"})
+            traceback.print_exc()
+    threading.Thread(target=_bg, daemon=True).start()
+    return jsonify({"status": "running", "started": REPLAY["started"],
+                    "hint": "reload this URL in ~20-60s"})
 @app.route("/healthz")
 def healthz():
     with LOCK:
