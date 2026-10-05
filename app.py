@@ -78,7 +78,7 @@ MIN_R2 = float(os.environ.get("MIN_R2", 0.60))
 MIN_SLOPE = float(os.environ.get("MIN_SLOPE", 0.30))      # pts per 1h bar
 MIN_ATR_TRADE = float(os.environ.get("MIN_ATR_TRADE", 2.5))
 BIAS_MIN_PCT = float(os.environ.get("BIAS_MIN_PCT", 60))  # % of bias weight to arm
-CONF_MIN = float(os.environ.get("CONF_MIN", 70))          # % to fire an alert
+CONF_MIN = float(os.environ.get("CONF_MIN", 60))          # % to fire an alert
 ARM_HOURS = float(os.environ.get("ARM_HOURS", 8))         # armed setup lifetime
 PULLBACK_Z = 0.25          # long: armed when z <= +0.25 (at/through midline)
 RETRACE_Z = float(os.environ.get("RETRACE_Z", 0.6))
