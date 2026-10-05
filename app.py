@@ -94,15 +94,15 @@ RETEST_TOL = float(os.environ.get("RETEST_TOL", 1.5))   # pts of slack around th
 # level when the wait expires, take it at market instead of dropping it. 0 = off.
 RETEST_CHASE_PTS = float(os.environ.get("RETEST_CHASE_PTS", 3.0))
 RSI_LEN, EMA_FAST, EMA_SLOW = 14, 50, 200
-STOP_PTS      = float(os.environ.get("STOP_PTS", 6.0))       # fixed stop
-TARGET1_PTS   = float(os.environ.get("TARGET1_PTS", 10.0))   # fixed target
+STOP_PTS      = float(os.environ.get("STOP_PTS", 5.25))       # fixed stop
+TARGET1_PTS   = float(os.environ.get("TARGET1_PTS", 9.0))   # fixed target
 STOP_ATR_MULT = float(os.environ.get("STOP_ATR_MULT", 1.5))
 MIN_STOP_PTS  = float(os.environ.get("MIN_STOP_PTS", STOP_PTS))   # min = max = fixed
 MAX_STOP_PTS  = float(os.environ.get("MAX_STOP_PTS", STOP_PTS))
 TARGET_R      = float(os.environ.get("TARGET_R", 1.0))       # unused while target is fixed
 # Exit plan shown on alerts / dashboard - indicative only, managed manually live
 PARTIAL_PCT   = int(os.environ.get("PARTIAL_PCT", 50))       # % closed at target
-TRAIL_PTS     = float(os.environ.get("TRAIL_PTS", 13.0))     # trail width after target
+TRAIL_PTS     = float(os.environ.get("TRAIL_PTS", 9.75))     # trail width after target
 
 SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", 12))   # 5m bars for swing stop
 
@@ -113,13 +113,13 @@ MAX_ALERTS_PER_DAY = int(os.environ.get("MAX_ALERTS_PER_DAY", 0))   # 0 = unlimi
 COOLDOWN_MIN = int(os.environ.get("COOLDOWN_MIN", 45))
 DUPE_PTS = float(os.environ.get("DUPE_PTS", 12.0))
 CONF_MIN_OVERNIGHT = float(os.environ.get("CONF_MIN_OVERNIGHT", 75))
-LOSS_COOLDOWN_MIN = int(os.environ.get("LOSS_COOLDOWN_MIN", 120))  # same-direction block after a stop-out
+LOSS_COOLDOWN_MIN = int(os.environ.get("LOSS_COOLDOWN_MIN", 150))  # same-direction block after a stop-out
 
 POLL_FAST = int(os.environ.get("POLL_FAST", 30))
 POLL_SLOW = int(os.environ.get("POLL_SLOW", 180))
 # Alerts only fire inside this ET window (scanning never stops).
-ALERT_WINDOW_START = os.environ.get("ALERT_WINDOW_START", "06:00")  # ET, premarket open
-ALERT_WINDOW_END = os.environ.get("ALERT_WINDOW_END", "20:00")      # ET, RTH close
+ALERT_WINDOW_START = os.environ.get("ALERT_WINDOW_START", "06:30")  # ET, premarket open
+ALERT_WINDOW_END = os.environ.get("ALERT_WINDOW_END", "16:00")      # ET, RTH close
 WATCHDOG_SEC = int(os.environ.get("WATCHDOG_SEC", 300))   # restart if loop stalls
 # Feed resilience: exponential backoff after consecutive fetch failures
 # (POLL_FAST, 2x, 4x ... capped at BACKOFF_MAX seconds) and a per-host
