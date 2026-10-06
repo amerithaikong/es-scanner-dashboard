@@ -1024,14 +1024,14 @@ def api_status():
             "price_updated": STATE["price_updated"],
             "bias": STATE["bias"], "avoid": STATE["avoid"],
             "setup": ({"direction": setup["direction"],
-                       "expires_in": max(0, int(setup["expires_at"] - time.time()))}
-                      if setup else None),
+                       "expires_in": max(0, int(setup["expires_at"] - time.time()))
+                      } if setup else None),
             "trigger": STATE["trigger"], "confidence": STATE["confidence"],
             "why_not": STATE["why_not"],
             "pending": ({"direction": STATE["pending"]["direction"],
                          "level": STATE["pending"]["level"],
-                         "expires_in": max(0, int(STATE["pending"]["expires_at"] - time.time()))}
-                        if STATE["pending"] else None),
+                         "expires_in": max(0, int(STATE["pending"]["expires_at"] - time.time()))
+                      } if STATE["pending"] else None),
             "alerts": STATE["alerts"], "alerts_prev": STATE["alerts_prev"],
             "alerts_today": STATE["alerts_today"], "session": STATE["alerts_date"],
             "max_alerts": MAX_ALERTS_PER_DAY or None, 
