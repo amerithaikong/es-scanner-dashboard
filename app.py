@@ -1044,8 +1044,8 @@ def api_status():
                        "bias_min_pct": BIAS_MIN_PCT, "conf_min": CONF_MIN,
                        "stop_pts": STOP_PTS, "target1_pts": TARGET1_PTS,
                        "partial_pct": PARTIAL_PCT, "trail_pts": TRAIL_PTS,
-                       "conf_min_overnight": CONF_MIN_OVERNIGHT},
-           # display-only: lets the page describe the rules it is actually running
+                       "conf_min_overnight": CONF_MIN_OVERNIGHT,
+                        # display-only: lets the page describe the rules it is actually running
                        "arm_hours": ARM_HOURS, "cooldown_min": COOLDOWN_MIN,
                        "loss_cooldown_min": LOSS_COOLDOWN_MIN,
                        "retest_bars": RETEST_BARS, "retest_chase_pts": RETEST_CHASE_PTS,
