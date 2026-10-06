@@ -9,6 +9,163 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+<style>
+:root{
+  --bg:#0B0E14; --panel-solid:#121722; --inset:#1A2133; --line:#232B3D;
+  --text:#E8EAF2; --muted:#8B93A8; --dim:#4A5268;
+  --amber:#E8B25B; --amber-dim:#E8B25B33;
+  --long:#3DD68C; --short:#F2555A;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,monospace; --sans:'Archivo',system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:var(--bg)}
+body{font-family:var(--sans);color:var(--text);min-height:100vh;font-size:13px;line-height:1.45;
+  background:radial-gradient(1200px 500px at 70% -10%, #1A223A66, transparent),var(--bg)}
+a{color:inherit}
+.wrap{max-width:1240px;margin:0 auto;padding:0 20px 48px}
+.mono{font-family:var(--mono)}
+
+/* top bar */
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  padding:16px 0;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.brand h1{font-size:15px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}
+.brand .sub{font-size:11px;color:var(--muted);letter-spacing:.06em}
+.feed{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
+.dot.live{background:var(--long);animation:pulse 2s infinite}
+.dot.stale{background:var(--amber)} .dot.error{background:var(--short)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 #3DD68C66}70%{box-shadow:0 0 0 9px #3DD68C00}100%{box-shadow:0 0 0 0 #3DD68C00}}
+@media (prefers-reduced-motion: reduce){.dot.live{animation:none}.px-flash{transition:none!important}}
+
+/* ticker */
+.ticker{display:flex;flex-wrap:wrap;align-items:flex-end;gap:24px;padding:26px 0 22px}
+.ticker .sym{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.1em;margin-bottom:8px}
+.px{font-family:var(--mono);font-size:56px;font-weight:700;line-height:1;letter-spacing:-.01em;transition:color .35s}
+.px-flash.up{color:var(--long)} .px-flash.down{color:var(--short)}
+.chg{font-family:var(--mono);font-size:16px;font-weight:500;padding:6px 12px;border-radius:6px;border:1px solid var(--line);margin-bottom:6px}
+.chg.up{color:var(--long);border-color:#3DD68C44;background:#3DD68C11}
+.chg.down{color:var(--short);border-color:#F2555A44;background:#F2555A11}
+.tick-meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:9px}
+
+/* layout */
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px;align-items:start}
+.col{display:flex;flex-direction:column;gap:16px;min-width:0}
+@media(max-width:960px){.grid{grid-template-columns:1fr}.px{font-size:42px}
+  .col{display:contents} .card{order:3} .card.c-price{order:1} .card.c-bias{order:2} .card.c-alerts{order:4}}
+.card{background:var(--panel-solid);border:1px solid var(--line);border-radius:10px;padding:18px;min-width:0}
+.card h2{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+  margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.card h2 .tag{font-family:var(--mono);font-size:10.5px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--dim);text-align:right}
+h3{font-size:10px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:14px 0 4px;
+  display:flex;justify-content:space-between;align-items:baseline}
+h3 .cnt{font-family:var(--mono);font-weight:400;letter-spacing:0}
+
+/* chart */
+#chartWrap{position:relative;height:460px}
+@media(max-width:960px){#chartWrap{height:320px}}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:10px;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.legend i{display:inline-block;width:18px;height:0;border-top:2px solid var(--amber);vertical-align:middle;margin-right:6px}
+.legend i.dash{border-top-style:dashed;border-top-width:1px;border-color:#E8B25B88}
+.legend i.dot{border-top-style:dotted;border-color:#E8B25B66}
+.legend i.zone{height:9px;border:0;background:var(--amber-dim)}
+.legend i.px{border-color:var(--text);border-width:1.5px}
+
+/* bias */
+.metric-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:12px}
+.metric{border:1px solid var(--line);border-radius:8px;padding:10px 12px;min-width:0}
+.metric .k{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+.metric .v{font-family:var(--mono);font-size:20px;font-weight:600;margin-top:4px;white-space:nowrap}
+.metric .v.ok{color:var(--amber)}
+.metric .need{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:2px}
+.badge{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12.5px;font-weight:700;
+  letter-spacing:.06em;padding:8px 12px;border-radius:6px;border:1px solid var(--line);color:var(--muted);max-width:100%}
+.badge.long{color:var(--long);border-color:#3DD68C55;background:#3DD68C14}
+.badge.short{color:var(--short);border-color:#F2555A55;background:#F2555A14}
+.badge.armed{color:var(--amber);border-color:#E8B25B55;background:#E8B25B14}
+.note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
+
+/* one row style for every checklist: bias factors, trigger factors, avoid filters */
+.factor{display:flex;align-items:flex-start;gap:9px;padding:6px 0;border-bottom:1px solid var(--line);
+  font-family:var(--mono);font-size:12px;line-height:1.35;color:var(--muted);min-width:0}
+.factor:last-child{border-bottom:0}
+.factor .name{flex:1 1 auto;min-width:0}
+.factor .box{width:15px;height:15px;margin-top:1px;border-radius:4px;border:1px solid var(--dim);flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:10px;line-height:1}
+.factor.pass{color:var(--text)} .factor.pass .box{border-color:var(--long);color:var(--long)}
+.factor.fail .box{border-color:var(--short);color:var(--short)}
+.factor.na{opacity:.5} .factor.na .box{border-style:dashed}
+.factor.block{color:var(--short)} .factor.block .box{border-color:var(--short);color:var(--short);background:#F2555A14}
+.factor .det{flex:0 1 auto;font-size:10.5px;color:var(--dim);text-align:right;max-width:44%;overflow-wrap:anywhere}
+.empty{font-size:12px;color:var(--dim);font-family:var(--mono);padding:6px 0;line-height:1.6}
+
+/* confidence */
+.state{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;font-weight:700;letter-spacing:.04em;
+  padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:var(--inset);color:var(--muted);margin-bottom:12px}
+.state::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
+.state.armed{color:var(--amber);border-color:#E8B25B44} .state.armed::before{background:var(--amber)}
+.state.pending{color:var(--amber);border-color:#E8B25B44} .state.pending::before{background:var(--amber);animation:pulse 1.6s infinite}
+.state.clear{color:var(--long);border-color:#3DD68C44} .state.clear::before{background:var(--long);animation:pulse 1.6s infinite}
+.confhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:6px}
+.confread{font-family:var(--mono);font-size:26px;font-weight:700;line-height:1}
+.confread.hot{color:var(--long)}
+.confneed{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right;line-height:1.4}
+.confbar{position:relative;height:8px;border-radius:6px;background:var(--inset);border:1px solid var(--line);overflow:visible;margin:2px 0 12px}
+.conffill{height:100%;width:0;border-radius:6px;background:linear-gradient(90deg,#4A5268,var(--amber));transition:width .5s}
+.conffill.hot{background:linear-gradient(90deg,var(--amber),var(--long))}
+.confmin{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--text);opacity:.6}
+.why{list-style:none;font-family:var(--mono);font-size:11.5px;color:var(--muted);line-height:1.5;margin:0 0 4px}
+.why li{display:flex;gap:7px;padding:2px 0}
+.why li::before{content:"\25B8";color:var(--amber);flex:none}
+.why.clear li::before{color:var(--long)}
+
+/* alerts */
+.alert-count{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.alerts{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
+.alert{border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:6px;padding:10px 12px;font-family:var(--mono);font-size:12px;min-width:0}
+.alert.LONG{border-left-color:var(--long)} .alert.SHORT{border-left-color:var(--short)}
+.alert .head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.alert .dirn{font-weight:700} .alert .dirn.LONG{color:var(--long)} .alert .dirn.SHORT{color:var(--short)}
+.alert .conf{font-weight:700;color:var(--amber)}
+.alert .levels{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:8px 0 6px}
+.alert .levels div{background:var(--inset);border-radius:5px;padding:5px 7px;min-width:0}
+.alert .levels .k{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);font-family:var(--sans)}
+.alert .levels .v{font-size:12px;white-space:nowrap}
+.alert .plan{color:var(--muted);font-size:11px;line-height:1.5}
+.alert .when{color:var(--dim);font-size:10px;margin-top:4px}
+details.prev{margin-top:10px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+details.prev summary{cursor:pointer;padding:4px 0;list-style:none}
+details.prev summary::before{content:"\25B8 ";color:var(--dim)} details.prev[open] summary::before{content:"\25BE "}
+details.prev .alert{opacity:.75}
+
+.footnote{margin-top:20px;font-size:11px;color:var(--dim);font-family:var(--mono);line-height:1.8}
+.tfsel{background:var(--panel-solid);color:var(--text);border:1px solid var(--line);border-radius:6px;font-family:var(--mono);font-size:11px;padding:4px 8px;cursor:pointer}
+.tfsel:focus{outline:1px solid var(--amber)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="brand">
+      <h1>ES Regime Scanner</h1>
+      <span class="sub">linear regression channel &middot; alert-only &middot; paper</span>
+    </div>
+    <div class="feed">
+      <span class="dot" id="feedDot"></span>
+      <span id="feedText">connecting…</span>
+    </div>
+  </div>
+
+  <div class="ticker">
+    <div>
+      <div class="sym">{{ symbol }} &middot; CME E-MINI S&amp;P 500 &middot; RTH + ETH</div>
+      <div class="px px-flash" id="lastPx">——.—</div>
+    </div>
+    <div class="chg" id="chg">— pts (—%)</div>
+    <div class="tick-meta" id="tickMeta">vs prior settle —</div>
+  </div>
+
 <div class="grid">
    <div class="col">
     <div class="card c-price">
@@ -73,76 +230,6 @@
   </div>
 
   <div class="footnote" id="footnote">Loading rules from the scanner…</div>
-</head>
-<body>
-<div class="wrap">
-
-  <div class="topbar">
-    <div class="brand">
-      <h1>ES Regime Scanner</h1>
-      <span class="sub">linear regression channel &middot; alert-only &middot; paper</span>
-    </div>
-    <div class="feed">
-      <span class="dot" id="feedDot"></span>
-      <span id="feedText">connecting…</span>
-    </div>
-  </div>
-
-  <div class="ticker">
-    <div>
-      <div class="sym">{{ symbol }} &middot; CME E-MINI S&amp;P 500 &middot; RTH + ETH</div>
-      <div class="px px-flash" id="lastPx">——.—</div>
-    </div>
-    <div class="chg" id="chg">— pts (—%)</div>
-    <div class="tick-meta" id="tickMeta">vs prior settle —</div>
-  </div>
-
-  <div class="grid">
-    <div class="card chart-card">
-      <h2>Price
-        <span style="display:flex;gap:10px;align-items:center">
-          <span class="tag" id="chartTag">regression channel: 1H dual 40/20</span>
-          <select id="tfSel" class="tfsel" aria-label="Chart timeframe">
-            <option value="5m" selected>5m</option>
-            <option value="15m">15m</option>
-            <option value="1h">1h</option>
-          </select>
-        </span>
-      </h2>
-      <div id="chartWrap"><canvas id="chart"></canvas></div>
-    </div>
-
-    <div class="card">
-      <h2>1H Bias <span class="tag" id="regimeUpdated"></span></h2>
-      <div class="metric-row">
-        <div class="metric"><div class="k">Slope pts/bar</div><div class="v" id="mSlope">—</div></div>
-        <div class="metric"><div class="k">R&sup2;</div><div class="v" id="mR2">—</div></div>
-        <div class="metric"><div class="k">Pullback z</div><div class="v" id="mZ">—</div></div>
-      </div>
-      <span class="badge" id="regimeBadge">SCANNING</span>
-      <div id="biasFactors" style="margin-top:12px"></div>
-      <div class="zone-note" id="zoneNote">Waiting for first evaluation…</div>
-    </div>
-
-    <div class="card">
-      <h2>Signal Confidence <span class="tag" id="confTag"></span></h2>
-      <div class="confbar"><div class="conffill" id="confFill"></div><div class="confmin" id="confMin"></div></div>
-      <div class="confread" id="confRead">— %</div>
-      <div class="whynot" id="whyNot"><div class="row">Waiting for first evaluation…</div></div>
-      <div id="trigFactors"><div class="empty">Trigger checklist activates while a pullback setup is armed.</div></div>
-      <div id="avoidList"></div>
-    </div>
-
-    <div class="card">
-      <h2>Alerts <span class="alert-count" id="alertCount">—</span></h2>
-      <div id="alerts"><div class="empty">No alerts yet. The scanner stays silent unless bias, pullback, trigger and confidence all clear. </div></div>
-    </div>
-  </div>
-
-  <div class="footnote">
-     <span id="footRules">Loading rules from the scanner…</span><br>
-
-  </div>
 </div>
 
 <script>
@@ -324,7 +411,7 @@ function alertCard(a, p){
   const when = DT.fromISO(a.ts).toUTC().toFormat('ccc dd LLL · HH:mm');
   const met = a.factors.filter(f=>f.ok).length, live = a.factors.filter(f=>!f.na).length;
   return `<div class="alert ${a.direction}">
-    <div class="head"><span><span class="dirn ${a.direction}">${a.direction}</span> <span style="color:var(--muted)">${when} ET</span></span><span class="conf">${a.confidence}%</span></div>
+    <div class="head"><span><span class="dirn ${a.direction}">${a.direction}</span> <span style="color:var(--muted)">${when} UTC</span></span><span class="conf">${a.confidence}%</span></div>
     <div class="levels">
       <div><div class="k">Entry</div><div class="v">${fmt(a.entry)}</div></div>
       <div><div class="k">Stop · ${pts(risk)} pts</div><div class="v">${fmt(a.stop)}</div></div>
