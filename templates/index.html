@@ -9,127 +9,70 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
-<style>
-:root{
-  --bg:#0B0E14; --panel:#12172250; --panel-solid:#121722; --line:#232B3D;
-  --text:#E8EAF2; --muted:#7A8299; --dim:#4A5268;
-  --amber:#E8B25B; --amber-dim:#E8B25B33;
-  --long:#3DD68C; --short:#F2555A;
-  --mono:'JetBrains Mono',monospace; --sans:'Archivo',sans-serif;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-html{background:var(--bg)}
-body{
-  font-family:var(--sans);color:var(--text);min-height:100vh;
-  background:
-    radial-gradient(1200px 500px at 70% -10%, #1A223A66, transparent),
-    var(--bg);
-}
-a{color:inherit}
-.wrap{max-width:1240px;margin:0 auto;padding:0 20px 48px}
+<div class="grid">
+   <div class="col">
+    <div class="card c-price">
+      <h2>Price
+        <span style="display:flex;gap:10px;align-items:center">
+          <span class="tag" id="chartTag">regression channel · 1H, best of 40/20 bars</span>
+          <select id="tfSel" class="tfsel" aria-label="Chart timeframe">
+            <option value="5m" selected>5m</option>
+            <option value="15m">15m</option>
+            <option value="1h">1h</option>
+          </select>
+        </span>
+      </h2>
+      <div id="chartWrap"><canvas id="chart"></canvas></div>
+      <div class="legend">
+        <span><i class="px"></i>close</span>
+        <span><i></i>regression midline</span>
+        <span><i class="dash"></i>&plusmn;1&sigma;</span>
+        <span><i class="dot"></i>&plusmn;2.5&sigma;</span>
+        <span><i class="zone"></i>pullback zone (setup arms here)</span>
+      </div>
+    </div>
 
-/* top bar */
-.topbar{display:flex;align-items:center;justify-content:space-between;
-  padding:16px 0;border-bottom:1px solid var(--line)}
-.brand{display:flex;align-items:baseline;gap:10px}
-.brand h1{font-size:15px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}
-.brand .sub{font-size:11px;color:var(--muted);letter-spacing:.06em}
-.feed{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;color:var(--muted)}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--dim)}
-.dot.live{background:var(--long);box-shadow:0 0 0 0 #3DD68C99;animation:pulse 2s infinite}
-.dot.stale{background:var(--amber)} .dot.error{background:var(--short)}
-@keyframes pulse{0%{box-shadow:0 0 0 0 #3DD68C66}70%{box-shadow:0 0 0 9px #3DD68C00}100%{box-shadow:0 0 0 0 #3DD68C00}}
-@media (prefers-reduced-motion: reduce){.dot.live{animation:none}.px-flash{transition:none!important}}
+    <div class="card c-alerts">
+      <h2>Alerts <span class="alert-count" id="alertCount">—</span></h2>
+      <div id="alerts" class="alerts"><div class="empty">No alerts this session. The scanner stays silent until bias, pullback, trigger, retest and confidence all clear.</div></div>
+      <details class="prev" id="prevWrap" hidden><summary id="prevSummary">Previous session</summary><div id="prevAlerts" class="alerts" style="margin-top:8px"></div></details>
+    </div>
+   </div>
 
-/* ticker */
-.ticker{display:flex;flex-wrap:wrap;align-items:flex-end;gap:24px;padding:26px 0 22px}
-.ticker .sym{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.1em;margin-bottom:8px}
-.px{font-family:var(--mono);font-size:56px;font-weight:700;line-height:1;letter-spacing:-.01em;
-  transition:color .35s}
-.px-flash.up{color:var(--long)} .px-flash.down{color:var(--short)}
-.chg{font-family:var(--mono);font-size:16px;font-weight:500;padding:6px 12px;border-radius:6px;
-  border:1px solid var(--line);margin-bottom:6px}
-.chg.up{color:var(--long);border-color:#3DD68C44;background:#3DD68C11}
-.chg.down{color:var(--short);border-color:#F2555A44;background:#F2555A11}
-.tick-meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:9px}
+   <div class="col">
+    <div class="card c-bias">
+      <h2>1H Bias <span class="tag" id="regimeUpdated"></span></h2>
+      <div class="metric-row">
+        <div class="metric"><div class="k">Slope</div><div class="v" id="mSlope">—</div><div class="need" id="mSlopeNeed">pts/bar</div></div>
+        <div class="metric"><div class="k">R&sup2;</div><div class="v" id="mR2">—</div><div class="need" id="mR2Need"></div></div>
+        <div class="metric"><div class="k">Pullback z</div><div class="v" id="mZ">—</div><div class="need">&sigma; from midline</div></div>
+      </div>
+      <span class="badge" id="regimeBadge">SCANNING</span>
+      <h3>Bias checklist <span class="cnt" id="biasCnt"></span></h3>
+      <div id="biasFactors"><div class="empty">Waiting for first evaluation…</div></div>
+      <div class="note" id="zoneNote"></div>
+    </div>
 
-/* layout */
-.grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px}
-@media(max-width:960px){.grid{grid-template-columns:1fr}.px{font-size:42px}}
-.card{background:var(--panel-solid);border:1px solid var(--line);border-radius:10px;padding:18px}
-.card h2{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
-  color:var(--muted);margin-bottom:14px;display:flex;justify-content:space-between;align-items:center}
-.card h2 .tag{font-family:var(--mono);font-size:10px;letter-spacing:0;text-transform:none;color:var(--dim)}
+    <div class="card c-signal">
+      <h2>Signal <span class="tag" id="sigTag"></span></h2>
+      <div class="state" id="state">Waiting for first evaluation…</div>
+      <div class="confhead">
+        <div class="confread" id="confRead">— %</div>
+        <div class="confneed" id="confNeed">confidence</div>
+      </div>
+      <div class="confbar"><div class="conffill" id="confFill"></div><div class="confmin" id="confMin"></div></div>
+      <ul class="why" id="whyNot"></ul>
+      <h3>Trigger checklist <span class="cnt" id="trigCnt"></span></h3>
+      <div id="trigFactors"><div class="empty">Activates once a pullback setup is armed.</div></div>
+      <div id="avoidWrap" hidden>
+        <h3>Avoid filters active <span class="cnt" id="avoidCnt"></span></h3>
+        <div id="avoidList"></div>
+      </div>
+    </div>
+   </div>
+  </div>
 
-/* chart */
-.chart-card{grid-row:span 3}
-#chartWrap{position:relative;height:440px}
-@media(max-width:960px){ #chartWrap{height:320px} }
-
-/* regime */
-.metric-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px}
-.metric{border:1px solid var(--line);border-radius:8px;padding:10px 12px}
-.metric .k{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
-.metric .v{font-family:var(--mono);font-size:20px;font-weight:600;margin-top:4px}
-.metric .v.ok{color:var(--amber)}
-.badge{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:13px;
-  font-weight:700;letter-spacing:.08em;padding:8px 14px;border-radius:6px;border:1px solid var(--line);color:var(--muted)}
-.badge.long{color:var(--long);border-color:#3DD68C55;background:#3DD68C14}
-.badge.short{color:var(--short);border-color:#F2555A55;background:#F2555A14}
-.badge.armed{color:var(--amber);border-color:#E8B25B55;background:#E8B25B14}
-.zone-note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
-
-/* checklist */
-.check{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);
-  font-family:var(--mono);font-size:12.5px}
-.check:last-child{border-bottom:0}
-.check .box{width:16px;height:16px;border-radius:4px;border:1px solid var(--dim);
-  display:flex;align-items:center;justify-content:center;font-size:11px;flex:none}
-.check.pass .box{border-color:var(--long);color:var(--long)}
-.check.pass{color:var(--text)} .check{color:var(--muted)}
-.empty{font-size:12px;color:var(--dim);font-family:var(--mono);padding:6px 0;line-height:1.6}
-
-/* alerts */
-.alert-count{font-family:var(--mono);font-size:11px;color:var(--muted)}
-.alert{border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:6px;
-  padding:10px 12px;margin-bottom:8px;font-family:var(--mono);font-size:12px}
-.alert .dirn{font-weight:700}
-.alert .dirn.LONG{color:var(--long)} .alert .dirn.SHORT{color:var(--short)}
-.alert .plan{color:var(--muted);margin-top:4px;font-size:11px;line-height:1.5}
-.alert .when{color:var(--dim);font-size:10px;margin-top:4px}
-
-.footnote{margin-top:20px;font-size:11px;color:var(--dim);font-family:var(--mono);line-height:1.7}
-
-/* v2: factors, confidence, avoid */
-.factor{display:flex;align-items:center;gap:9px;padding:6px 0;border-bottom:1px solid var(--line);
-  font-family:var(--mono);font-size:12px;color:var(--muted)}
-.factor:last-child{border-bottom:0}
-.factor .box{width:15px;height:15px;border-radius:4px;border:1px solid var(--dim);flex:none;
-  display:flex;align-items:center;justify-content:center;font-size:10px}
-.factor.pass{color:var(--text)} .factor.pass .box{border-color:var(--long);color:var(--long)}
-.factor.fail .box{border-color:var(--short);color:var(--short)}
-.factor.na{opacity:.45} .factor.na .box{border-style:dashed}
-.factor .det{margin-left:auto;font-size:10px;color:var(--dim)}
-.confbar{position:relative;height:10px;border-radius:6px;background:#1A2133;
-  border:1px solid var(--line);overflow:hidden;margin-bottom:8px}
-.conffill{height:100%;width:0;background:linear-gradient(90deg,#4A5268,var(--amber));
-  transition:width .5s}
-.conffill.hot{background:linear-gradient(90deg,var(--amber),var(--long))}
-.confmin{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--text);opacity:.5}
-.confread{font-family:var(--mono);font-size:22px;font-weight:700;margin-bottom:10px}
-.whynot{margin:2px 0 10px;padding:8px 10px;border-radius:6px;background:#1A2133;
-  border:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5}
-.whynot .row{display:flex;gap:7px} .whynot .row::before{content:"\25B8";color:var(--amber);flex:none}
-.whynot.clear{border-color:#3DDC9744;color:var(--long)} .whynot.clear .row::before{color:var(--long)}
-.avoid-chip{display:inline-block;
-.avoid-chip{display:inline-block;font-family:var(--mono);font-size:10.5px;color:var(--short);
-  border:1px solid #F2555A44;background:#F2555A0E;border-radius:5px;padding:4px 8px;
-  margin:8px 6px 0 0}
-.alert .conf{float:right;font-weight:700;color:var(--amber)}
-.tfsel{background:var(--panel-solid);color:var(--text);border:1px solid var(--line);
-  border-radius:6px;font-family:var(--mono);font-size:11px;padding:4px 8px;cursor:pointer}
-.tfsel:focus{outline:1px solid var(--amber)}
-</style>
+  <div class="footnote" id="footnote">Loading rules from the scanner…</div>
 </head>
 <body>
 <div class="wrap">
@@ -182,7 +125,7 @@ a{color:inherit}
     </div>
 
     <div class="card">
-      <h2>Signal Confidence <span class="tag" id="confTag">fires at ≥ 75%</span></h2>
+      <h2>Signal Confidence <span class="tag" id="confTag"></span></h2>
       <div class="confbar"><div class="conffill" id="confFill"></div><div class="confmin" id="confMin"></div></div>
       <div class="confread" id="confRead">— %</div>
       <div class="whynot" id="whyNot"><div class="row">Waiting for first evaluation…</div></div>
@@ -191,13 +134,14 @@ a{color:inherit}
     </div>
 
     <div class="card">
-      <h2>Alerts <span class="alert-count" id="alertCount">0 / 2 today</span></h2>
+      <h2>Alerts <span class="alert-count" id="alertCount">—</span></h2>
       <div id="alerts"><div class="empty">No alerts yet. The scanner stays silent unless bias, pullback, trigger and confidence all clear. </div></div>
     </div>
   </div>
 
   <div class="footnote">
-    Alert engine: 6&nbsp;pt stop &middot; 10&nbsp;pt target &middot; close 50% at target &middot; stop&rarr;BE &middot; trail rest 13&nbsp;pts (manual) &middot; 45&nbsp;min cooldown.<br>
+     <span id="footRules">Loading rules from the scanner…</span><br>
+
   </div>
 </div>
 
@@ -233,12 +177,21 @@ const leadDot = {
 };  
 
 function fmt(n, d=2){ return n==null ? '—' : Number(n).toFixed(d); }
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function fRow(f){
   const cls = f.na ? 'na' : (f.ok ? 'pass' : 'fail');
   const mark = f.na ? '–' : (f.ok ? '✓' : '✗');
-  return `<div class="factor ${cls}"><span class="box">${mark}</span>${f.name}` +
-         (f.detail ? `<span class="det">${f.detail}</span>` : '') + `</div>`;
+  return `<div class="factor ${cls}"><span class="box">${mark}</span><span class="name" title="${esc(f.name)}">${esc(f.name)}</span>` +
+         (f.detail ? `<span class="det" title="${esc(f.detail)}">${esc(f.detail)}</span>` : '') + `</div>`;
 }
+function aRow(text){
+  const m = String(text).match(/^(.*?)(?::\s|\s-\s)(.*)$/);
+  const name = m ? m[1] : text, det = m ? m[2] : '';
+  return `<div class="factor block"><span class="box">⊘</span><span class="name" title="${esc(text)}">${esc(name)}</span>` +
+         (det ? `<span class="det" title="${esc(det)}">${esc(det)}</span>` : '') + `</div>`;
+}
+const passCount = fs => { const live = fs.filter(f => !f.na); return `${live.filter(f => f.ok).length} / ${live.length}`; };
+const pts = n => Number(n).toFixed(2).replace(/\.?0+$/, '');
 
 function buildChart(){
   const ctx = $('chart').getContext('2d');
@@ -366,16 +319,31 @@ function setFeed(status, updatedIso, detail){
   txt.textContent = label + ago + why;
 }
 
+function alertCard(a, p){
+  const risk = Math.abs(a.entry - a.stop), tgt = Math.abs(a.t1 - a.entry);
+  const when = DT.fromISO(a.ts).toUTC().toFormat('ccc dd LLL · HH:mm');
+  const met = a.factors.filter(f=>f.ok).length, live = a.factors.filter(f=>!f.na).length;
+  return `<div class="alert ${a.direction}">
+    <div class="head"><span><span class="dirn ${a.direction}">${a.direction}</span> <span style="color:var(--muted)">${when} ET</span></span><span class="conf">${a.confidence}%</span></div>
+    <div class="levels">
+      <div><div class="k">Entry</div><div class="v">${fmt(a.entry)}</div></div>
+      <div><div class="k">Stop · ${pts(risk)} pts</div><div class="v">${fmt(a.stop)}</div></div>
+      <div><div class="k">Target · +${pts(tgt)} pts</div><div class="v">${fmt(a.t1)}</div></div>
+    </div>
+    <div class="plan">Close ${p.partial_pct}% at target · stop to breakeven · trail the rest ${pts(p.trail_pts)} pts (manual)</div>
+    <div class="plan" style="margin-top:4px">${met} of ${live} checks met · not met: ${a.factors.filter(f=>!f.ok && !f.na).map(f=>esc(f.name)).join(', ') || 'none'}</div>
+  </div>`;
+}
+
 async function refreshStatus(){
   try{
-     const r = await fetch('/api/status'); const d = await r.json();
-     const hb = d.loop && d.loop.ts
-      ? Math.round((Date.now() - DT.fromISO(d.loop.ts).toMillis()) / 1000) : null;
+    const r = await fetch('/api/status'); const d = await r.json();
+    const p = d.params || {};
+    const hb = d.loop && d.loop.ts ? Math.round((Date.now() - DT.fromISO(d.loop.ts).toMillis()) / 1000) : null;
     const stalled = hb != null && hb > 120;
-    setFeed(stalled ? 'stale' : d.feed.status, d.price_updated,
-            stalled ? `scanner heartbeat ${hb}s ago` : d.feed.detail);
+    setFeed(stalled ? 'stale' : d.feed.status, d.price_updated, stalled ? `scanner heartbeat ${hb}s ago` : d.feed.detail);
 
-    // price + real-time change flash
+    // price
     if(d.last_price != null){
       const el = $('lastPx');
       if(lastPrice != null && d.last_price !== lastPrice){
@@ -397,11 +365,13 @@ async function refreshStatus(){
     const reg = d.bias;
     if(reg){
       $('mSlope').textContent = (reg.slope>0?'+':'') + reg.slope.toFixed(2);
-      $('mSlope').className = 'v' + (Math.abs(reg.slope)>=d.params.min_slope?' ok':'');
-      $('mR2').textContent = reg.r2.toFixed(2) + '·' + reg.lookback;
-      $('mR2').className = 'v' + (reg.r2>=d.params.min_r2?' ok':'');
+      $('mSlope').className = 'v' + (Math.abs(reg.slope)>=p.min_slope?' ok':'');
+      $('mSlopeNeed').textContent = `pts/bar · need ±${p.min_slope}`;
+      $('mR2').textContent = reg.r2.toFixed(2);
+      $('mR2').className = 'v' + (reg.r2>=p.min_r2?' ok':'');
+      $('mR2Need').textContent = `${reg.lookback}-bar fit · need ${p.min_r2}`;
       $('mZ').textContent = (reg.z>0?'+':'') + reg.z.toFixed(2);
-      $('regimeUpdated').textContent = 'upd ' + DT.fromISO(reg.updated).toFormat('HH:mm');
+      $('regimeUpdated').textContent = 'updated ' + DT.fromISO(reg.updated).toUTC().toFormat('HH:mm') + ' UTC';
       const b = $('regimeBadge');
       if(d.setup){
         b.className='badge '+d.setup.direction.toLowerCase();
@@ -413,55 +383,78 @@ async function refreshStatus(){
         b.className='badge'; b.textContent='NO EDGE · STANDING DOWN';
       }
       $('biasFactors').innerHTML = reg.factors.map(fRow).join('');
+      $('biasCnt').textContent = `${passCount(reg.factors)} · score ${reg.pct.toFixed(0)}%`;
       $('zoneNote').textContent = reg.quality_ok
-        ? `Bias ${reg.pct.toFixed(0)}% (needs ${d.params.bias_min_pct}%). Setup arms when price pulls back to the regression midline; stays armed 8h awaiting trigger.`
-        : `Bias score ${reg.pct.toFixed(0)}% — needs ${d.params.bias_min_pct}%+ with a real slope. Chop = no trade.`;
+        ? `Score ${reg.pct.toFixed(0)}% clears the ${p.bias_min_pct}% needed to arm. A setup arms when price pulls back to the regression midline and stays armed ${p.arm_hours ?? 8} h waiting for a trigger.`
+        : `Needs ${p.bias_min_pct}%+ with a slope of at least ±${p.min_slope} pts/bar. Below that the scanner does not arm.`;
     }
 
-    // confidence + trigger factors + avoid
-    const cmin = d.bias && d.bias.in_rth ? d.params.conf_min
-               : (d.params.conf_min_overnight ?? d.params.conf_min);
-    $('confTag').textContent = `fires at ≥ ${cmin}%`;
+    // signal: state line, confidence, blockers, trigger checklist, avoid filters
+    const inRth = !!(d.bias && d.bias.in_rth);
+    const cmin = inRth ? p.conf_min : (p.conf_min_overnight ?? p.conf_min);
+    $('sigTag').textContent = `window ${p.window_start ?? ''}–${p.window_end ?? ''} ET`;
+    $('confNeed').innerHTML = `fires at &ge; ${cmin}%<br>${inRth ? 'regular hours' : 'outside 09:30–16:00 ET'} floor`;
     $('confMin').style.left = cmin + '%';
-
-    const fill = $('confFill');
+    const fill = $('confFill'), read = $('confRead');
     if(d.confidence != null){
+      const hot = d.confidence >= cmin;
       fill.style.width = Math.min(100, d.confidence) + '%';
-      fill.className = 'conffill' + (d.confidence >= d.params.conf_min ? ' hot' : '');
-      $('confRead').textContent = d.confidence.toFixed(0) + ' %';
+      fill.className = 'conffill' + (hot ? ' hot' : '');
+      read.textContent = d.confidence.toFixed(0) + ' %';
+      read.className = 'confread' + (hot ? ' hot' : '');
     } else {
       fill.style.width = '0%'; fill.className='conffill';
-      $('confRead').textContent = '— %';
+      read.textContent = '— %'; read.className = 'confread';
     }
-    const wn = $('whyNot'), why = d.why_not || [];
-    wn.className = 'whynot' + (why.length === 1 && why[0].startsWith('All gates clear') ? ' clear' : '');
-    wn.innerHTML = why.length ? why.map(w=>`<div class="row">${w}</div>`).join('')
-                              : '<div class="row">Waiting for first evaluation…</div>';
+    const st = $('state');
+    if(d.pending){
+      st.className = 'state pending';
+      st.textContent = `${d.pending.direction} TRIGGERED · waiting for retest of ${fmt(d.pending.level)} · ${Math.ceil(d.pending.expires_in/60)} min left`;
+    } else if(d.setup && d.why_not && d.why_not.length === 1 && d.why_not[0].startsWith('All gates clear')){
+      st.className = 'state clear';
+      st.textContent = `${d.setup.direction} ARMED · ALL GATES CLEAR · next qualifying bar fires`;
+    } else if(d.setup){
+      st.className = 'state armed';
+      st.textContent = `${d.setup.direction} ARMED · watching 5m bars for a trigger`;
+    } else if(reg && reg.quality_ok){
+      st.className = 'state'; st.textContent = `${reg.direction} BIAS · not armed yet`;
+    } else {
+      st.className = 'state'; st.textContent = 'NO SETUP';
+    }
+    const why = d.why_not || [], wn = $('whyNot');
+    const clear = why.length === 1 && why[0].startsWith('All gates clear');
+    wn.className = 'why' + (clear ? ' clear' : '');
+    wn.innerHTML = why.map(w => `<li>${esc(w)}</li>`).join('');
     if(d.trigger){
       $('trigFactors').innerHTML = d.trigger.factors.map(fRow).join('');
+      $('trigCnt').textContent = passCount(d.trigger.factors) + (d.trigger.mandatory_ok ? '' : ' · momentum bar required');
     } else {
-      $('trigFactors').innerHTML = '<div class="empty">Trigger checklist activates while a pullback setup is armed.</div>';
+      $('trigFactors').innerHTML = '<div class="empty">Activates once a pullback setup is armed.</div>';
+      $('trigCnt').textContent = '';
     }
-    $('avoidList').innerHTML = (d.avoid||[]).map(a=>`<span class="avoid-chip">⛔ ${a}</span>`).join('');
+    const av = d.avoid || [];
+    $('avoidWrap').hidden = !av.length;
+    $('avoidCnt').textContent = av.length ? `${av.length} blocking` : '';
+    $('avoidList').innerHTML = av.map(aRow).join('');
 
     // alerts
-    $('alertCount').textContent = `${d.alerts_today}${d.max_alerts ? " / " + d.max_alerts: ""} today` +
-      (d.cooldown_remaining>0 ? ` · cooldown ${Math.ceil(d.cooldown_remaining/60)}m` : '');
-    if(d.alerts.length){
-      $('alerts').innerHTML = d.alerts.map(a=>`
-        <div class="alert">
-          <span class="conf">${a.confidence}%</span>
-          <span class="dirn ${a.direction}">${a.direction}</span> @ ${a.entry.toFixed(2)}
-          <div class="plan">stop ${a.stop.toFixed(2)} · target ${a.t1.toFixed(2)} · close 50% · BE · trail 13 pts</div>
-          <div class="plan">${a.factors.filter(f=>f.ok).map(f=>'✓ '+f.name).join('<br>')}</div>
-          <div class="when">${DT.fromISO(a.ts).toFormat('ccc dd LLL · HH:mm')} UTC</div>
-        </div>`).join('');
-    }
+    $('alertCount').textContent = `${d.alerts_today}${d.max_alerts ? ' / ' + d.max_alerts : ''} this session` +
+      (d.cooldown_remaining>0 ? ` · cooldown ${Math.ceil(d.cooldown_remaining/60)} min` : '');
+    if(d.alerts.length) $('alerts').innerHTML = d.alerts.map(a => alertCard(a, p)).join('');
+    const prev = d.alerts_prev || [];
+    $('prevWrap').hidden = !prev.length;
+    if(prev.length){ $('prevSummary').textContent = `Previous session · ${prev.length} alert${prev.length>1?'s':''}`; $('prevAlerts').innerHTML = prev.map(a => alertCard(a, p)).join(''); }
+
+    // footnote built from the live rules
+    const retest = p.retest_bars > 0 ? `entry on retest of the breakout level within ${p.retest_bars} bars` + (p.retest_chase_pts > 0 ? ` (market if within ${pts(p.retest_chase_pts)} pts)` : '') : 'entry at market';
+    $('footnote').innerHTML =
+      `Rules now running: stop ${pts(p.stop_pts)} pts &middot; target ${pts(p.target1_pts)} pts &middot; close ${p.partial_pct}% at target, stop&rarr;BE, trail ${pts(p.trail_pts)} pts (manual) &middot; ${retest}.<br>` +
+      `Fires at &ge; ${p.conf_min}% in regular hours, &ge; ${p.conf_min_overnight}% otherwise &middot; alerts ${p.window_start}&ndash;${p.window_end} ET &middot; ${p.cooldown_min} min between alerts &middot; ${p.loss_cooldown_min} min same-side block after a stop &middot; ${p.max_alerts ? p.max_alerts + ' per day max' : 'no daily cap'}.<br>` +
+      `Data: Yahoo Finance via proxy, may lag 1&ndash;2 min. Decision support for manual paper trading; nothing here places orders.`;
   }catch(e){
     setFeed('error', null); console.error(e);
   }
 }
-
 buildChart();
 $('chart').addEventListener('mouseleave', () => {
   hoverIdx = null;
