@@ -118,7 +118,7 @@ LOSS_COOLDOWN_MIN = int(os.environ.get("LOSS_COOLDOWN_MIN", 150))  # same-direct
 POLL_FAST = int(os.environ.get("POLL_FAST", 30))
 POLL_SLOW = int(os.environ.get("POLL_SLOW", 180))
 # Alerts only fire inside this ET window (scanning never stops).
-ALERT_WINDOW_START = os.environ.get("ALERT_WINDOW_START", "06:30")  # ET, premarket open
+ALERT_WINDOW_START = os.environ.get("ALERT_WINDOW_START", "04:00")  # ET, premarket open
 ALERT_WINDOW_END = os.environ.get("ALERT_WINDOW_END", "16:00")      # ET, RTH close
 WATCHDOG_SEC = int(os.environ.get("WATCHDOG_SEC", 300))   # restart if loop stalls
 # Feed resilience: exponential backoff after consecutive fetch failures
