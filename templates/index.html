@@ -329,20 +329,20 @@ function buildChart(){
           bodyFont:{family:'JetBrains Mono', size:12},
           filter: i => i.datasetIndex === 0,
           callbacks:{
-            title: items => items.length ? DT.fromMillis(items[0].parsed.x)
+            title: items => items.length ? DT.fromMillis(items[0].parsed.x).setZone('America/Los_Angeles')
               .toFormat('ccc dd LLL yyyy · HH:mm') : '',
             label: i => ' ' + i.parsed.y.toFixed(2)
           }
         }
       },
       scales:{
-        x:{type:'time',
+        x:{type:'time', adapters:{date:{zone:'America/Los_Angeles'}},
            time:{tooltipFormat:'dd LLL HH:mm',
                  displayFormats:{hour:'HH:mm', day:'dd LLL'}},
            grid:{color:'#1A2133'},
            ticks:{color:css('--muted'), font:{family:'JetBrains Mono', size:10},
                   maxRotation:0, autoSkipPadding:24},
-           title:{display:true, text:'Time · date', color:css('--dim'),
+           title:{display:true, text:'Pacific time', color:css('--dim'),
                   font:{family:'Archivo', size:10}}},
         y:{position:'right', grid:{color:'#1A2133'},
            ticks:{color:css('--muted'), font:{family:'JetBrains Mono', size:11},
@@ -408,7 +408,7 @@ function setFeed(status, updatedIso, detail){
 
 function alertCard(a, p){
   const risk = Math.abs(a.entry - a.stop), tgt = Math.abs(a.t1 - a.entry);
-  const when = DT.fromISO(a.ts).toUTC().toFormat('ccc dd LLL · HH:mm');
+  const when = DT.fromISO(a.ts).setZone('America/Los_Angeles').toFormat('ccc dd LLL · HH:mm');
   const met = a.factors.filter(f=>f.ok).length, live = a.factors.filter(f=>!f.na).length;
   return `<div class="alert ${a.direction}">
     <div class="head"><span><span class="dirn ${a.direction}">${a.direction}</span> <span style="color:var(--muted)">${when} UTC</span></span><span class="conf">${a.confidence}%</span></div>
@@ -458,7 +458,7 @@ async function refreshStatus(){
       $('mR2').className = 'v' + (reg.r2>=p.min_r2?' ok':'');
       $('mR2Need').textContent = `${reg.lookback}-bar fit · need ${p.min_r2}`;
       $('mZ').textContent = (reg.z>0?'+':'') + reg.z.toFixed(2);
-      $('regimeUpdated').textContent = 'updated ' + DT.fromISO(reg.updated).toUTC().toFormat('HH:mm') + ' UTC';
+      $('regimeUpdated').textContent = 'updated ' + DT.fromISO(reg.updated).setZone('America/Los_Angeles').toFormat('HH:mm') + ' PT';
       const b = $('regimeBadge');
       if(d.setup){
         b.className='badge '+d.setup.direction.toLowerCase();
