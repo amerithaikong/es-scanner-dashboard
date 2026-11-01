@@ -67,7 +67,7 @@ import requests
 import socket
 import urllib3.util.connection as _urllib3_cn
 _urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request
 
 # ----------------------------------------------------------------------
 # Config - env vars override where noted
@@ -690,11 +690,178 @@ def yahoo_chart(interval, range_, session=None):
 
 
 
+# ---------------- Real-time overlay: Schwab streaming (CHART_FUTURES) --------
+# Yahoo stays the source of history (Schwab's price-history endpoint has no
+# futures). Schwab's streamer pushes live 1-minute /ES bars; we aggregate them
+# to 5m/1h and lay them over the tail of the Yahoo series, so the newest bars
+# are real-time instead of ~15 minutes stale. Schwab refresh tokens die after
+# 7 days: /schwab/login re-links in one tap, and we text a reminder on day 6.
+SCHWAB_KEY = os.environ.get("SCHWAB_APP_KEY", "")
+SCHWAB_SECRET = os.environ.get("SCHWAB_APP_SECRET", "")
+SCHWAB_CALLBACK = os.environ.get("SCHWAB_CALLBACK_URL", "").rstrip("/")
+SCHWAB_TOKEN_PATH = os.environ.get("SCHWAB_TOKEN_PATH", "schwab_token.json")
+SCHWAB_SYMBOL = os.environ.get("SCHWAB_SYMBOL", "/ES")
+SCHWAB_ENABLED = bool(SCHWAB_KEY and SCHWAB_SECRET and SCHWAB_CALLBACK)
+SCHWAB_REMIND_DAYS = float(os.environ.get("SCHWAB_REMIND_DAYS", 6))
+_sw = {"bars": {}, "auth_ctx": None, "status": "off", "started": False,
+       "reminded": False, "last_msg": 0.0}
+_sw_lock = threading.Lock()
+
+
+def _sw_token_age_days():
+    try:
+        import json
+        with open(SCHWAB_TOKEN_PATH) as f:
+            return (time.time() - json.load(f)["creation_timestamp"]) / 86400
+    except Exception:
+        return None
+
+
+def _sw_login_url():
+    return SCHWAB_CALLBACK.rsplit("/schwab/", 1)[0] + "/schwab/login"
+
+
+async def _sw_stream():
+    from schwab.auth import client_from_token_file
+    from schwab.streaming import StreamClient
+    client = client_from_token_file(SCHWAB_TOKEN_PATH, SCHWAB_KEY, SCHWAB_SECRET)
+    stream = StreamClient(client)
+
+    def on_chart(msg):
+        for row in msg.get("content", []):
+            try:
+                t = int(row["CHART_TIME_MILLIS"])
+                bar = (float(row["OPEN_PRICE"]), float(row["HIGH_PRICE"]),
+                       float(row["LOW_PRICE"]), float(row["CLOSE_PRICE"]),
+                       float(row.get("VOLUME") or 0))
+            except (KeyError, TypeError, ValueError):
+                continue
+            with _sw_lock:
+                _sw["bars"][t] = bar
+                _sw["last_msg"] = time.time()
+                if len(_sw["bars"]) > 3000:          # keep ~2 days of 1m bars
+                    for k in sorted(_sw["bars"])[:-3000]:
+                        del _sw["bars"][k]
+
+    stream.add_chart_futures_handler(on_chart)
+    await stream.login()
+    await stream.chart_futures_subs([SCHWAB_SYMBOL])
+    _sw["status"] = "live"
+    while True:
+        await stream.handle_message()
+
+
+def _sw_thread():
+    import asyncio
+    while True:
+        age = _sw_token_age_days()
+        if age is None:
+            _sw["status"] = "needs login"
+            if not _sw["reminded"]:
+                _sw["reminded"] = True
+                send_sms(f"ES scanner: Schwab not linked. Tap {_sw_login_url()}")
+            time.sleep(30)
+            continue
+        if age >= 7:
+            _sw["status"] = "token expired - login needed"
+            if not _sw["reminded"]:
+                _sw["reminded"] = True
+                send_sms(f"ES scanner: Schwab login expired, running on delayed "
+                         f"data. Tap {_sw_login_url()}")
+            time.sleep(60)
+            continue
+        if age >= SCHWAB_REMIND_DAYS and not _sw["reminded"]:
+            _sw["reminded"] = True
+            send_sms(f"ES scanner: Schwab login expires in "
+                     f"{7 - age:.1f} days. Tap {_sw_login_url()}")
+        try:
+            _sw["status"] = "connecting"
+            asyncio.run(_sw_stream())
+        except Exception as e:
+            _sw["status"] = f"error: {type(e).__name__}: {str(e)[:80]}"
+            print(f"[warn] schwab stream: {type(e).__name__}: {str(e)[:120]}",
+                  flush=True)
+        time.sleep(15)
+
+
+def _sw_ensure_started():
+    with _sw_lock:
+        if _sw["started"]:
+            return
+        _sw["started"] = True
+    threading.Thread(target=_sw_thread, daemon=True, name="schwab").start()
+
+
+def _sw_frame(minutes):
+    """Live 1m bars -> complete-or-forming N-minute bars. The first bucket is
+    dropped unless we were streaming when it opened, so no bar is half-built."""
+    with _sw_lock:
+        items = sorted(_sw["bars"].items())
+    if not items:
+        return None
+    df = pd.DataFrame([v for _, v in items],
+                      columns=["Open", "High", "Low", "Close", "Volume"],
+                      index=pd.to_datetime([k for k, _ in items], unit="ms", utc=True))
+    agg = df.resample(f"{minutes}min", label="left", closed="left").agg(
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last",
+         "Volume": "sum"}).dropna(subset=["Close"])
+    first_full = df.index[0].ceil(f"{minutes}min")
+    agg = agg[agg.index >= first_full]
+    return agg if len(agg) else None
+
+
 def fetch(interval: str, period: str) -> pd.DataFrame:
-    # yfinance fallback removed: from this server's IP the direct Yahoo hosts
-    # are hard 429-blocked, so yf.download() could never succeed - and it has
-    # no request timeout, which is what silently froze the scanner thread.
-    return yahoo_chart(interval, period, session =_scanner_session)
+    df = yahoo_chart(interval, period, session =_scanner_session)
+    if not SCHWAB_ENABLED or interval not in ("5m", "1h"):
+        return df
+    _sw_ensure_started()
+    try:
+        live = _sw_frame(5 if interval == "5m" else 60)
+        if live is None or time.time() - _sw["last_msg"] > 900:
+            _note_host("schwab", None, f"{_sw['status']}; no live bars, Yahoo only")
+            return df
+        df = pd.concat([df[df.index < live.index[0]], live])
+        _note_host("schwab", 200, f"live: {len(live)} {interval} bars overlaid "
+                                   f"(token {(_sw_token_age_days() or 0):.1f}d old)")
+    except Exception as e:
+        _note_host("schwab", None, f"{type(e).__name__}: {e}")
+        print(f"[warn] schwab overlay failed: {e}", flush=True)
+    return df
+
+
+@app.route("/schwab/login")
+def schwab_login():
+    if not SCHWAB_ENABLED:
+        return "Set SCHWAB_APP_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK_URL first", 400
+    from schwab.auth import get_auth_context
+    ctx = get_auth_context(SCHWAB_KEY, SCHWAB_CALLBACK)
+    _sw["auth_ctx"] = ctx
+    return redirect(ctx.authorization_url)
+
+
+@app.route("/schwab/callback")
+def schwab_callback():
+    import json
+    from schwab.auth import client_from_received_url
+    ctx = _sw["auth_ctx"]
+    if ctx is None:
+        return f"Session lost. Start again at {_sw_login_url()}", 400
+
+    def write_token(t, *a, **k):
+        with open(SCHWAB_TOKEN_PATH, "w") as f:
+            json.dump(t, f)
+
+    try:
+        client_from_received_url(SCHWAB_KEY, SCHWAB_SECRET, ctx,
+                                 request.url.replace("http://", "https://", 1),
+                                 write_token)
+    except Exception as e:
+        return f"Schwab link failed: {type(e).__name__}: {e}", 500
+    _sw["auth_ctx"], _sw["reminded"] = None, False
+    with _sw_lock:
+        _sw["bars"].clear()
+    return ("Schwab linked. Live data starts within a minute - you can close "
+            "this tab. Next login due in 7 days.")
 
 
 def prev_close_from_htf(htf: pd.DataFrame):
