@@ -510,6 +510,75 @@ def session_date():
     if et.hour >= 18:
         d += timedelta(days=1)
     return d.isoformat()
+# ---------------- Phone push (ntfy) + data-age tracking ----------------
+# Free phone notifications: install the "ntfy" app, subscribe to a topic name,
+# and set that same name in Render as NTFY_TOPIC. No account needed.
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
+NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+_asof = {"ts": None}      # time of the newest trade in the Yahoo 5m feed
+
+
+def push(title, body, priority="default", tags=""):
+    if not NTFY_TOPIC:
+        return
+    try:
+        headers = {"Title": title, "Priority": priority, "Tags": tags}
+        link = os.environ.get("RENDER_EXTERNAL_URL", "")
+        if link:
+            headers["Click"] = link      # tapping the notification opens the dashboard
+        requests.post(f"{NTFY_SERVER}/{NTFY_TOPIC}", data=body.encode("utf-8"),
+                      headers=headers, timeout=8)
+    except Exception as e:
+        print(f"[warn] push failed: {e}", flush=True)
+
+
+def data_info():
+    """Which feed the 5m bars come from and how far behind real time it is."""
+    now = time.time()
+    src, ts = "Yahoo", _asof["ts"]
+    try:
+        with _sw_lock:
+            newest = max(_sw["bars"]) if _sw["bars"] else None
+        if SCHWAB_ENABLED and newest and now - _sw["last_msg"] <= 900:
+            src, ts = "Schwab", newest / 1000 + 60
+    except Exception:
+        pass
+    if not ts:
+        return {"src": src, "lag_s": None, "data_ts": None}
+    ts = min(ts, now)
+    return {"src": src, "lag_s": int(now - ts),
+            "data_ts": datetime.fromtimestamp(ts, timezone.utc).isoformat()}
+
+
+def lag_text():
+    info = data_info()
+    if info["lag_s"] is None:
+        return "Data age unknown - check live price"
+    if info["lag_s"] <= 120:
+        return f"Data is real-time ({info['src']})"
+    return (f"Data is {info['lag_s'] // 60} min behind ({info['src']}) - "
+            f"check live price before entering")
+
+
+def notify_stage(before, after, alerted, last_price):
+    """Push when a trigger starts waiting for its retest (GET READY), and when
+    that wait ends with no entry (CANCEL). Entry pushes come from maybe_alert."""
+    if after and after is not before:
+        if not in_alert_window():
+            return
+        d, lvl = after["direction"], after["level"]
+        sgn = 1 if d == "LONG" else -1
+        mins = max(0, int((after["expires_at"] - time.time()) / 60))
+        after["pushed"] = True
+        push(f"GET READY - {d} ES limit {lvl:.2f}",
+             f"Price now {last_price:.2f} ({abs(last_price - lvl):.2f} pts away)\n"
+             f"Stop {lvl - sgn * STOP_PTS:.2f} | Target {lvl + sgn * TARGET1_PTS:.2f}\n"
+             f"Good for about {mins} min | Confidence {after['conf']:.0f}%\n"
+             f"{lag_text()}", "high", "eyes")
+    elif before and not after and not alerted and before.get("pushed"):
+        push(f"CANCEL - {before['direction']} ES {before['level']:.2f}",
+             "Setup ended without an entry. Pull any resting limit order.",
+             "default", "x")
   
 def maybe_alert(direction, conf, bias, trig):
     if not in_alert_window():
@@ -542,7 +611,7 @@ def maybe_alert(direction, conf, bias, trig):
         t1 = entry + t1_pts if direction == "LONG" else entry - t1_pts
 
         alert = {"ts": datetime.now(timezone.utc).isoformat(), "limit": trig.get("limit"), 
-                 "risk": risk, "direction": direction,
+                 "risk": risk, "direction": direction, **data_info(), 
                  "confidence": round(conf), "entry": round(entry, 2),
                  "stop": round(stop, 2), "t1": round(t1, 2),
                  "session": STATE["alerts_date"],
@@ -556,6 +625,9 @@ def maybe_alert(direction, conf, bias, trig):
     body = format_alert(direction, conf, bias, trig, entry, stop, t1)
     print("ALERT\n" + body)
     send_sms(body)
+    push(f"ENTER {direction} ES @ {entry:.2f}",
+         f"Stop {stop:.2f} | Target {t1:.2f} | Confidence {conf:.0f}%\n{lag_text()}",
+         "urgent", "rotating_light")
     return True
 
 
@@ -676,6 +748,10 @@ def yahoo_chart(interval, range_, session=None):
             if len(df) < 5:
                 raise RuntimeError(f"empty {interval} response")
             df["Volume"] = df["Volume"].fillna(0)
+            if interval == "5m":
+                last_bar = float(df.index[-1].timestamp())
+                quote = (res.get("meta") or {}).get("regularMarketTime")
+                _asof["ts"] = min(float(quote), last_bar + 300) if quote else last_bar
             _note_host(base, r.status_code, f"ok {len(df)} bars")
             return df
         except Exception as e:
@@ -1010,7 +1086,8 @@ def scanner_loop():
                     elif maybe_alert(setup["direction"], conf, bias, trig):
                         setup = None  # consumed
                         STATE["ext_z"] = bias["z"]
-
+                    notify_stage(pend, STATE["pending"], STATE["last_alert_ts"] >= now, last_price)
+             
             # ---- "why not firing" readout for the dashboard ----
             why = []
             pend = STATE["pending"]
@@ -1189,6 +1266,7 @@ def api_status():
             "last_price": STATE["last_price"], "prev_close": STATE["prev_close"],
             "change_pts": STATE["change_pts"], "change_pct": STATE["change_pct"],
             "price_updated": STATE["price_updated"],
+            "data" : data_info(),
             "bias": STATE["bias"], "avoid": STATE["avoid"],
             "setup": ({"direction": setup["direction"],
                        "expires_in": max(0, int(setup["expires_at"] - time.time()))
