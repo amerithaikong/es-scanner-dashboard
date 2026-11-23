@@ -1086,7 +1086,7 @@ def scanner_loop():
                     elif maybe_alert(setup["direction"], conf, bias, trig):
                         setup = None  # consumed
                         STATE["ext_z"] = bias["z"]
-                    notify_stage(pend, STATE["pending"], STATE["last_alert_ts"] >= now, last_price)
+            notify_stage(pend, STATE["pending"], STATE["last_alert_ts"] >= now, last_price)
              
             # ---- "why not firing" readout for the dashboard ----
             why = []
@@ -1539,6 +1539,13 @@ def api_replay():
     threading.Thread(target=_bg, daemon=True).start()
     return jsonify({"status": "running", "started": REPLAY["started"],
                     "hint": "reload this URL in ~20-60s"})
+@app.route("/api/test-push")
+def api_test_push():
+    if not NTFY_TOPIC:
+        return "NTFY_TOPIC is not set in Render's Environment tab", 400
+    push("TEST - ES scanner", f"Phone alerts are working. {lag_text()}", "high", "white_check_mark")
+    return f"Test sent to ntfy topic '{NTFY_TOPIC}'. Check your phone."
+  
 @app.route("/healthz")
 def healthz():
     with LOCK:
