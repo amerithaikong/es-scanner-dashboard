@@ -409,10 +409,17 @@ function setFeed(status, updatedIso, detail){
 function alertCard(a, p){
   const risk = Math.abs(a.entry - a.stop), tgt = Math.abs(a.t1 - a.entry);
   const when = DT.fromISO(a.ts).setZone('America/Los_Angeles').toFormat('ccc dd LLL · HH:mm');
+  const lagMin = a.lag_s != null ? Math.round(a.lag_s / 60) : null;
+  const asOf = a.data_ts ? DT.fromISO(a.data_ts).setZone('America/Los_Angeles').toFormat('HH:mm') : null;
+  const lagNote = lagMin == null ? ''
+    : lagMin >= 2 ? `<div class="when" style="color:var(--amber)">Price is from ${asOf} PT · data was ${lagMin} min behind (${esc(a.src || '')})</div>`
+    : `<div class="when">Real-time data (${esc(a.src || '')})</div>`;
+
   const met = a.factors.filter(f=>f.ok).length, live = a.factors.filter(f=>!f.na).length;
   return `<div class="alert ${a.direction}">
-    <div class="head"><span><span class="dirn ${a.direction}">${a.direction}</span> <span style="color:var(--muted)">${when} UTC</span></span><span class="conf">${a.confidence}%</span></div>
+    <div class="head"><span><span class="dirn ${a.direction}">${a.direction}</span> <span style="color:var(--muted)">${when} PT</span></span><span class="conf">${a.confidence}%</span></div>
     <div class="levels">
+    ${lagNote}
       <div><div class="k">Entry</div><div class="v">${fmt(a.entry)}</div></div>
       <div><div class="k">Stop · ${pts(risk)} pts</div><div class="v">${fmt(a.stop)}</div></div>
       <div><div class="k">Target · +${pts(tgt)} pts</div><div class="v">${fmt(a.t1)}</div></div>
@@ -429,6 +436,15 @@ async function refreshStatus(){
     const hb = d.loop && d.loop.ts ? Math.round((Date.now() - DT.fromISO(d.loop.ts).toMillis()) / 1000) : null;
     const stalled = hb != null && hb > 120;
     setFeed(stalled ? 'stale' : d.feed.status, d.price_updated, stalled ? `scanner heartbeat ${hb}s ago` : d.feed.detail);
+    const dl = d.data || {};
+    if(!stalled && d.feed.status === 'live' && dl.lag_s != null){
+      const mins = Math.round(dl.lag_s / 60), delayed = dl.lag_s > 120;
+      $('feedDot').className = 'dot ' + (delayed ? 'stale' : 'live');
+      $('feedText').textContent = dl.lag_s > 5400 ? `NO NEW TRADES · market closed or feed paused · ${dl.src}`
+        : delayed ? `DELAYED ${mins} MIN · ${dl.src} data · prices are ${mins} min old`
+        : `REAL-TIME · ${dl.src} · ${dl.lag_s}s behind`;
+    }
+
 
     // price
     if(d.last_price != null){
@@ -496,7 +512,9 @@ async function refreshStatus(){
     const st = $('state');
     if(d.pending){
       st.className = 'state pending';
-      st.textContent = `${d.pending.direction} TRIGGERED · waiting for retest of ${fmt(d.pending.level)} · ${Math.ceil(d.pending.expires_in/60)} min left`;
+      const lv = d.pending.level, sg = d.pending.direction === 'LONG' ? 1 : -1;
+      const away = d.last_price != null ? ` · price ${pts(Math.abs(d.last_price - lv))} pts away` : '';
+      st.textContent = `GET READY · ${d.pending.direction} limit ${fmt(lv)} · stop ${fmt(lv - sg * p.stop_pts)} · target ${fmt(lv + sg * p.target1_pts)}${away} · ${Math.ceil(d.pending.expires_in/60)} min left`;
     } else if(d.setup && d.why_not && d.why_not.length === 1 && d.why_not[0].startsWith('All gates clear')){
       st.className = 'state clear';
       st.textContent = `${d.setup.direction} ARMED · ALL GATES CLEAR · next qualifying bar fires`;
