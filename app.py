@@ -518,7 +518,35 @@ NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 _asof = {"ts": None}      # time of the newest trade in the Yahoo 5m feed
 
 
+# Telegram: free, and not limited by Render's shared IP like ntfy.sh is.
+TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+TG_API = os.environ.get("TELEGRAM_API", "https://api.telegram.org").rstrip("/")
+
+
+def send_telegram(title, body, silent=False):
+    """Returns a short result string, e.g. 'telegram ok' or the error."""
+    link = os.environ.get("RENDER_EXTERNAL_URL", "")
+    text = f"{title}\n{body}" + (f"\n{link}" if link else "")
+    try:
+        r = requests.post(f"{TG_API}/bot{TG_TOKEN}/sendMessage",
+                          json={"chat_id": TG_CHAT, "text": text,
+                                "disable_notification": silent,
+                                "disable_web_page_preview": True},
+                          timeout=8)
+        if r.status_code == 200:
+            return "telegram ok"
+        return f"telegram HTTP {r.status_code}: {r.text[:200]}"
+    except Exception as e:
+        return f"telegram error: {type(e).__name__}: {e}"
+
+
 def push(title, body, priority="default", tags=""):
+    if TG_TOKEN and TG_CHAT:
+        res = send_telegram(title, body, silent=priority in ("low", "min"))
+        if res != "telegram ok":
+            print(f"[warn] push failed: {res}", flush=True)
+        return
     if not NTFY_TOPIC:
         return
     try:
@@ -526,10 +554,13 @@ def push(title, body, priority="default", tags=""):
         link = os.environ.get("RENDER_EXTERNAL_URL", "")
         if link:
             headers["Click"] = link      # tapping the notification opens the dashboard
-        requests.post(f"{NTFY_SERVER}/{NTFY_TOPIC}", data=body.encode("utf-8"),
-                      headers=headers, timeout=8)
+        r = requests.post(f"{NTFY_SERVER}/{NTFY_TOPIC}", data=body.encode("utf-8"),
+                          headers=headers, timeout=8)
+        if r.status_code != 200:
+            print(f"[warn] push failed: ntfy HTTP {r.status_code}: {r.text[:150]}", flush=True)
     except Exception as e:
         print(f"[warn] push failed: {e}", flush=True)
+
 
 
 def data_info():
@@ -1539,10 +1570,43 @@ def api_replay():
     threading.Thread(target=_bg, daemon=True).start()
     return jsonify({"status": "running", "started": REPLAY["started"],
                     "hint": "reload this URL in ~20-60s"})
+@app.route("/api/telegram-setup")
+def api_telegram_setup():
+    """After messaging your bot once, this shows the chat ID to put in Render."""
+    if not TG_TOKEN:
+        return "Set TELEGRAM_BOT_TOKEN in Render's Environment tab first", 400
+    try:
+        r = requests.get(f"{TG_API}/bot{TG_TOKEN}/getUpdates", timeout=8)
+        data = r.json()
+    except Exception as e:
+        return f"Could not reach Telegram: {type(e).__name__}: {e}", 502
+    if not data.get("ok"):
+        return f"Telegram said: {data.get('description', data)}  (check the bot token)", 400
+    chats = {}
+    for u in data.get("result", []):
+        msg = u.get("message") or u.get("edited_message") or {}
+        chat = msg.get("chat") or {}
+        if "id" in chat:
+            chats[chat["id"]] = chat.get("first_name") or chat.get("title") or ""
+    if not chats:
+        return ("No messages found. Open your bot in Telegram, tap Start or send it "
+                "'hi', then reload this page.", 200, {"Content-Type": "text/plain"})
+    lines = [f"TELEGRAM_CHAT_ID = {cid}   ({name})" for cid, name in chats.items()]
+    return ("Put this in Render's Environment tab:\n\n" + "\n".join(lines),
+            200, {"Content-Type": "text/plain; charset=utf-8"})
+
+
 @app.route("/api/test-push")
 def api_test_push():
+    if TG_TOKEN and TG_CHAT:
+        res = send_telegram("TEST - ES scanner", f"Phone alerts are working. {lag_text()}")
+        hint = "" if res == "telegram ok" else (
+            "\n\nIf it says 'chat not found': open your bot, tap Start, and re-check "
+            "TELEGRAM_CHAT_ID at /api/telegram-setup")
+        return (f"Sent via Telegram to chat {TG_CHAT}\nResult: {res}{hint}",
+                200, {"Content-Type": "text/plain; charset=utf-8"})
     if not NTFY_TOPIC:
-        return "NTFY_TOPIC is not set in Render's Environment tab", 400
+        return "Neither Telegram nor NTFY_TOPIC is set in Render's Environment tab", 400
     url = f"{NTFY_SERVER}/{NTFY_TOPIC}"
     try:
         r = requests.post(url, data="Phone alerts are working.".encode("utf-8"),
@@ -1555,6 +1619,7 @@ def api_test_push():
             f"Posted to: {url}\n{result}\n\n"
             f"Check what ntfy received: {url}/json?poll=1&since=10m",
             200, {"Content-Type": "text/plain; charset=utf-8"})
+
   
 @app.route("/healthz")
 def healthz():
