@@ -1543,8 +1543,18 @@ def api_replay():
 def api_test_push():
     if not NTFY_TOPIC:
         return "NTFY_TOPIC is not set in Render's Environment tab", 400
-    push("TEST - ES scanner", f"Phone alerts are working. {lag_text()}", "high", "white_check_mark")
-    return f"Test sent to ntfy topic '{NTFY_TOPIC}'. Check your phone."
+    url = f"{NTFY_SERVER}/{NTFY_TOPIC}"
+    try:
+        r = requests.post(url, data="Phone alerts are working.".encode("utf-8"),
+                          headers={"Title": "TEST - ES scanner", "Priority": "high"},
+                          timeout=8)
+        result = f"ntfy answered HTTP {r.status_code}: {r.text[:200]}"
+    except Exception as e:
+        result = f"Could not reach ntfy: {type(e).__name__}: {e}"
+    return (f"Topic in Render: [{NTFY_TOPIC}] ({len(NTFY_TOPIC)} characters)\n"
+            f"Posted to: {url}\n{result}\n\n"
+            f"Check what ntfy received: {url}/json?poll=1&since=10m",
+            200, {"Content-Type": "text/plain; charset=utf-8"})
   
 @app.route("/healthz")
 def healthz():
